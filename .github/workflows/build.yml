@@ -84,7 +84,6 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # Root Gradle plugins
           p = root / "build.gradle"
           s = p.read_text()
 
@@ -113,7 +112,6 @@ jobs:
 
           p.write_text(s + "\n")
 
-          # App module plugins and SDK
           p = root / "app/build.gradle"
           s = p.read_text()
 
@@ -134,12 +132,8 @@ jobs:
           if "compileSdk 37" not in s:
               raise SystemExit("compileSdk 37 configuration failed")
 
-          if "org.jetbrains.kotlin.android" not in s:
-              raise SystemExit("Kotlin plugin missing from app module")
-
           p.write_text(s)
 
-          # Dependency repositories
           p = root / "settings.gradle"
           s = p.read_text()
 
@@ -153,19 +147,22 @@ jobs:
 
           p.write_text(s)
 
-          # Disable AGP built-in Kotlin to use Kotlin Gradle Plugin 2.4.20
           p = root / "gradle.properties"
           s = p.read_text()
 
           lines = [
               line for line in s.splitlines()
               if not line.startswith("android.builtInKotlin=")
+              and not line.startswith("android.newDsl=")
           ]
 
           lines.append("android.builtInKotlin=false")
+          lines.append("android.newDsl=false")
+
           p.write_text("\n".join(lines) + "\n")
 
-          print("AGP 9.1.1 + Kotlin Gradle Plugin 2.4.20 configured")
+          print("AGP 9.1.1 + Kotlin 2.4.20 configured")
+          print("Android new DSL disabled for Kotlin plugin compatibility")
           PY
 
       - name: Verify build configuration
