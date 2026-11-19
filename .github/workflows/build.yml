@@ -1,93 +1,479 @@
 
-package com.rezadev.resolutionmanager
+package com.rezadev.resolutionmanager;
 
-import android.content.Context
-import com.flyfishxu.kadb.Kadb
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import java.util.function.Consumer
+import android.app.Service;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.provider.Settings;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
-/** Internal Wireless Debugging ADB bridge. */
-object ADBBridge {
+import java.util.ArrayDeque;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+public class FloatingGamingService extends Service {
 
-    @JvmStatic
-    fun pairAndConnect(
-        context: Context,
-        host: String,
-        pairingPort: Int,
-        pairingCode: String,
-        connectPort: Int,
-        success: Consumer<String>,
-        failure: Consumer<String>
-    ) {
-        scope.launch {
-            try {
-                Kadb.pair(host, pairingPort, pairingCode)
+    private WindowManager wm;
+    private WindowManager.LayoutParams panelLp, fpsLp, touchLp;
+    private LinearLayout panel;
+    private TextView fpsView, touchView, fpsControl, touchControl;
+    private FpsGraphView graphView;
+    private Handler handler;
 
-                Kadb.create(host, connectPort).use { adb ->
-                    val result = adb.shell("echo RRM_ADB_CONNECTED")
+    private boolean fpsEnabled = false;
+    private boolean graphMode = false;
+    private boolean touchEnabled = false;
+    private boolean polling = false;
 
-                    if (result.exitCode != 0 ||
-                        !result.output.contains("RRM_ADB_CONNECTED")) {
-                        throw IllegalStateException(
-                            result.output.ifBlank {
-                                "ADB connection verification failed"
+    private final ArrayDeque<Integer> samples = new ArrayDeque<>();
+
+    private int touchDownX, touchDownY, startX, startY;
+
+    private final Runnable poll = new Runnable() {
+        @Override
+        public void run() {
+            if (!fpsEnabled || polling) return;
+
+            String host = getSharedPreferences("adb", MODE_PRIVATE)
+                    .getString("host", null);
+
+            int port = getSharedPreferences("adb", MODE_PRIVATE)
+                    .getInt("port", 0);
+
+            if (host == null || port == 0) {
+                handler.postDelayed(this, 1800);
+                return;
+            }
+
+            polling = true;
+
+            String pkg = getSharedPreferences("gaming", MODE_PRIVATE)
+                    .getString(
+                            "fps_package",
+                            "com.activision.callofduty.shooter"
+                    );
+
+            if (!isPackageInstalled(pkg)
+                    && isPackageInstalled("com.garena.game.codm")) {
+                pkg = "com.garena.game.codm";
+            }
+
+            ADBBridge.shell(
+                    host,
+                    port,
+                    "dumpsys gfxinfo " + pkg
+                            + " reset; sleep 1; dumpsys gfxinfo " + pkg,
+
+                    output -> handler.post(() -> {
+                        polling = false;
+
+                        Matcher m = Pattern.compile(
+                                "Total frames rendered:\\s*(\\d+)"
+                        ).matcher(output);
+
+                        int fps = m.find()
+                                ? Integer.parseInt(m.group(1))
+                                : -1;
+
+                        if (fps >= 0) {
+                            samples.addLast(Math.min(fps, 240));
+
+                            while (samples.size() > 30) {
+                                samples.removeFirst();
                             }
-                        )
-                    }
-                }
 
-                context.getSharedPreferences(
-                    "adb",
-                    Context.MODE_PRIVATE
-                ).edit()
-                    .putString("host", host)
-                    .putInt("port", connectPort)
-                    .apply()
+                            renderFps();
 
-                success.accept("ADB داخلی متصل شد")
+                        } else if (fpsView != null) {
+                            fpsView.setText("FPS: --");
+                        }
 
-            } catch (t: Throwable) {
-                failure.accept(
-                    t.message ?: t.javaClass.simpleName
-                )
+                        if (fpsEnabled) {
+                            handler.postDelayed(this, 250);
+                        }
+                    }),
+
+                    error -> handler.post(() -> {
+                        polling = false;
+
+                        if (fpsEnabled) {
+                            handler.postDelayed(this, 1500);
+                        }
+                    })
+            );
+        }
+    };
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        handler = new Handler(Looper.getMainLooper());
+
+        wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+
+        if (!Settings.canDrawOverlays(this)) {
+            stopSelf();
+            return;
+        }
+
+        createPanel();
+        createFps();
+        createTouchButton();
+    }
+
+    private boolean isPackageInstalled(String pkg) {
+        try {
+            getPackageManager().getPackageInfo(pkg, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private GradientDrawable bg(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(14));
+        d.setStroke(dp(1), 0xFF626B82);
+        return d;
+    }
+
+    private TextView label(String value) {
+        TextView t = new TextView(this);
+
+        t.setText(value);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(12);
+        t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(9), dp(7), dp(9), dp(7));
+        t.setBackground(bg(0xEE20283A));
+
+        return t;
+    }
+
+    private WindowManager.LayoutParams params(
+            int w,
+            int h,
+            int gravity
+    ) {
+        WindowManager.LayoutParams lp =
+                new WindowManager.LayoutParams(
+                        w,
+                        h,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        PixelFormat.TRANSLUCENT
+                );
+
+        lp.gravity = gravity;
+
+        return lp;
+    }
+
+    private void createPanel() {
+        panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(5), dp(5), dp(5), dp(5));
+        panel.setBackground(bg(0xE9121722));
+
+        TextView head = label("RRM  ⋮  کشیدن برای جابه‌جایی");
+        panel.addView(head);
+
+        fpsControl = label("FPS: خاموش");
+        fpsControl.setOnClickListener(v -> toggleFps());
+        panel.addView(fpsControl);
+
+        TextView mode = label("حالت نمایش: عدد / نمودار");
+
+        mode.setOnClickListener(v -> {
+            graphMode = !graphMode;
+            renderFps();
+
+            mode.setText(
+                    graphMode ? "نمایش نمودار" : "نمایش عددی"
+            );
+        });
+
+        panel.addView(mode);
+
+        touchControl = label("دکمه لمسی: خاموش");
+        touchControl.setOnClickListener(v -> toggleTouch());
+        panel.addView(touchControl);
+
+        TextView close = label("بستن پنل");
+        close.setOnClickListener(v -> stopSelf());
+        panel.addView(close);
+
+        panelLp = params(-2, -2, Gravity.TOP | Gravity.START);
+        panelLp.x = dp(12);
+        panelLp.y = dp(100);
+
+        wm.addView(panel, panelLp);
+        makeDraggable(head, panelLp);
+    }
+
+    private void createFps() {
+        fpsView = label("FPS: خاموش");
+
+        fpsLp = params(-2, -2, Gravity.TOP | Gravity.END);
+        fpsLp.x = dp(12);
+        fpsLp.y = dp(80);
+
+        graphView = new FpsGraphView(this);
+        graphView.setMinimumWidth(dp(170));
+        graphView.setMinimumHeight(dp(72));
+    }
+
+    private void renderFps() {
+        if (fpsView == null) return;
+
+        int last = samples.isEmpty()
+                ? -1
+                : samples.peekLast();
+
+        fpsView.setText(
+                last < 0 ? "FPS: --" : "FPS: " + last
+        );
+
+        graphView.setValues(
+                new java.util.ArrayList<>(samples)
+        );
+
+        if (fpsEnabled) {
+            View desired = graphMode ? graphView : fpsView;
+            View other = graphMode ? fpsView : graphView;
+
+            if (other.getParent() != null) {
+                wm.removeView(other);
+            }
+
+            if (desired.getParent() == null) {
+                wm.addView(desired, fpsLp);
             }
         }
     }
 
-    @JvmStatic
-    fun shell(
-        host: String,
-        port: Int,
-        command: String,
-        success: Consumer<String>,
-        failure: Consumer<String>
-    ) {
-        scope.launch {
-            try {
-                Kadb.create(host, port).use { adb ->
-                    val result = adb.shell(command)
+    private void toggleFps() {
+        fpsEnabled = !fpsEnabled;
 
-                    if (result.exitCode != 0) {
-                        throw IllegalStateException(
-                            result.output.ifBlank {
-                                "Command failed"
-                            }
-                        )
-                    }
+        if (fpsControl != null) {
+            fpsControl.setText(
+                    fpsEnabled ? "FPS: روشن" : "FPS: خاموش"
+            );
+        }
 
-                    success.accept(result.output)
-                }
+        if (fpsEnabled) {
+            samples.clear();
+            renderFps();
+            handler.post(poll);
 
-            } catch (t: Throwable) {
-                failure.accept(
-                    t.message ?: t.javaClass.simpleName
-                )
+        } else {
+            handler.removeCallbacks(poll);
+
+            if (fpsView.getParent() != null) {
+                wm.removeView(fpsView);
+            }
+
+            if (graphView.getParent() != null) {
+                wm.removeView(graphView);
             }
         }
+    }
+
+    private void createTouchButton() {
+        android.content.SharedPreferences prefs =
+                getSharedPreferences("gaming", MODE_PRIVATE);
+
+        int size = prefs.getInt("touch_size", 100);
+        int opacity = prefs.getInt("touch_opacity", 75);
+
+        String shape = prefs.getString("touch_shape", "TAP");
+        int color = prefs.getInt("touch_color", 0xFF2B8A70);
+
+        touchView = label(shape);
+        touchView.setTextSize(14);
+        touchView.setBackground(bg(color));
+        touchView.setAlpha(opacity / 100f);
+
+        int px = dp(Math.max(40, Math.min(140, 64 * size / 100)));
+
+        touchLp = params(px, px, Gravity.TOP | Gravity.START);
+        touchLp.x = dp(260);
+        touchLp.y = dp(420);
+
+        touchView.setOnTouchListener((v, e) -> {
+
+            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                touchDownX = (int) e.getRawX();
+                touchDownY = (int) e.getRawY();
+
+                startX = touchLp.x;
+                startY = touchLp.y;
+
+                return true;
+            }
+
+            if (e.getAction() == MotionEvent.ACTION_MOVE) {
+                touchLp.x = startX
+                        + (int) e.getRawX() - touchDownX;
+
+                touchLp.y = startY
+                        + (int) e.getRawY() - touchDownY;
+
+                wm.updateViewLayout(touchView, touchLp);
+                return true;
+            }
+
+            if (e.getAction() == MotionEvent.ACTION_UP) {
+                int dx = Math.abs(
+                        (int) e.getRawX() - touchDownX
+                );
+
+                int dy = Math.abs(
+                        (int) e.getRawY() - touchDownY
+                );
+
+                if (dx < 12 && dy < 12) {
+                    TouchAccessibilityService svc =
+                            TouchAccessibilityService.instance;
+
+                    if (svc == null) {
+                        Toast.makeText(
+                                this,
+                                "ابتدا سرویس دسترس‌پذیری RRM را فعال کن.",
+                                Toast.LENGTH_LONG
+                        ).show();
+
+                    } else {
+                        int x = getSharedPreferences(
+                                "gaming", MODE_PRIVATE
+                        ).getInt("target_x", 50);
+
+                        int y = getSharedPreferences(
+                                "gaming", MODE_PRIVATE
+                        ).getInt("target_y", 50);
+
+                        svc.tapPercent(x, y);
+                    }
+                }
+
+                return true;
+            }
+
+            return true;
+        });
+    }
+
+    private void toggleTouch() {
+        touchEnabled = !touchEnabled;
+
+        if (touchControl != null) {
+            touchControl.setText(
+                    touchEnabled
+                            ? "دکمه لمسی: روشن"
+                            : "دکمه لمسی: خاموش"
+            );
+        }
+
+        if (touchEnabled) {
+            if (touchView.getParent() == null) {
+                wm.addView(touchView, touchLp);
+            }
+
+        } else if (touchView.getParent() != null) {
+            wm.removeView(touchView);
+        }
+    }
+
+    private void makeDraggable(
+            View v,
+            WindowManager.LayoutParams lp
+    ) {
+        final int[] xy = new int[2];
+        final int[] raw = new int[2];
+
+        v.setOnTouchListener((view, event) -> {
+
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                xy[0] = lp.x;
+                xy[1] = lp.y;
+
+                raw[0] = (int) event.getRawX();
+                raw[1] = (int) event.getRawY();
+
+                return true;
+            }
+
+            if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                lp.x = xy[0]
+                        + (int) event.getRawX() - raw[0];
+
+                lp.y = xy[1]
+                        + (int) event.getRawY() - raw[1];
+
+                wm.updateViewLayout(v, lp);
+                return true;
+            }
+
+            return event.getAction() == MotionEvent.ACTION_UP;
+        });
+    }
+
+    private int dp(int n) {
+        return (int) (
+                n * getResources().getDisplayMetrics().density + 0.5f
+        );
+    }
+
+    @Override
+    public int onStartCommand(
+            Intent intent,
+            int flags,
+            int startId
+    ) {
+        return START_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+
+        if (panel != null && panel.getParent() != null) {
+            wm.removeView(panel);
+        }
+
+        if (fpsView != null && fpsView.getParent() != null) {
+            wm.removeView(fpsView);
+        }
+
+        if (graphView != null && graphView.getParent() != null) {
+            wm.removeView(graphView);
+        }
+
+        if (touchView != null && touchView.getParent() != null) {
+            wm.removeView(touchView);
+        }
+
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
     }
 }
