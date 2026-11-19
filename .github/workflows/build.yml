@@ -1,479 +1,271 @@
 
-package com.rezadev.resolutionmanager;
-
-import android.app.Service;
-import android.content.Intent;
-import android.graphics.Color;
-import android.graphics.PixelFormat;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
-import android.os.Handler;
-import android.os.IBinder;
-import android.os.Looper;
-import android.provider.Settings;
-import android.view.Gravity;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowManager;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.Toast;
-
-import java.util.ArrayDeque;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-public class FloatingGamingService extends Service {
-
-    private WindowManager wm;
-    private WindowManager.LayoutParams panelLp, fpsLp, touchLp;
-    private LinearLayout panel;
-    private TextView fpsView, touchView, fpsControl, touchControl;
-    private FpsGraphView graphView;
-    private Handler handler;
-
-    private boolean fpsEnabled = false;
-    private boolean graphMode = false;
-    private boolean touchEnabled = false;
-    private boolean polling = false;
-
-    private final ArrayDeque<Integer> samples = new ArrayDeque<>();
-
-    private int touchDownX, touchDownY, startX, startY;
-
-    private final Runnable poll = new Runnable() {
-        @Override
-        public void run() {
-            if (!fpsEnabled || polling) return;
-
-            String host = getSharedPreferences("adb", MODE_PRIVATE)
-                    .getString("host", null);
-
-            int port = getSharedPreferences("adb", MODE_PRIVATE)
-                    .getInt("port", 0);
-
-            if (host == null || port == 0) {
-                handler.postDelayed(this, 1800);
-                return;
-            }
-
-            polling = true;
-
-            String pkg = getSharedPreferences("gaming", MODE_PRIVATE)
-                    .getString(
-                            "fps_package",
-                            "com.activision.callofduty.shooter"
-                    );
-
-            if (!isPackageInstalled(pkg)
-                    && isPackageInstalled("com.garena.game.codm")) {
-                pkg = "com.garena.game.codm";
-            }
-
-            ADBBridge.shell(
-                    host,
-                    port,
-                    "dumpsys gfxinfo " + pkg
-                            + " reset; sleep 1; dumpsys gfxinfo " + pkg,
-
-                    output -> handler.post(() -> {
-                        polling = false;
-
-                        Matcher m = Pattern.compile(
-                                "Total frames rendered:\\s*(\\d+)"
-                        ).matcher(output);
-
-                        int fps = m.find()
-                                ? Integer.parseInt(m.group(1))
-                                : -1;
-
-                        if (fps >= 0) {
-                            samples.addLast(Math.min(fps, 240));
-
-                            while (samples.size() > 30) {
-                                samples.removeFirst();
-                            }
-
-                            renderFps();
-
-                        } else if (fpsView != null) {
-                            fpsView.setText("FPS: --");
-                        }
-
-                        if (fpsEnabled) {
-                            handler.postDelayed(this, 250);
-                        }
-                    }),
-
-                    error -> handler.post(() -> {
-                        polling = false;
-
-                        if (fpsEnabled) {
-                            handler.postDelayed(this, 1500);
-                        }
-                    })
-            );
-        }
-    };
-
-    @Override
-    public void onCreate() {
-        super.onCreate();
-
-        handler = new Handler(Looper.getMainLooper());
-
-        wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-
-        if (!Settings.canDrawOverlays(this)) {
-            stopSelf();
-            return;
-        }
-
-        createPanel();
-        createFps();
-        createTouchButton();
-    }
-
-    private boolean isPackageInstalled(String pkg) {
-        try {
-            getPackageManager().getPackageInfo(pkg, 0);
-            return true;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private GradientDrawable bg(int color) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(dp(14));
-        d.setStroke(dp(1), 0xFF626B82);
-        return d;
-    }
-
-    private TextView label(String value) {
-        TextView t = new TextView(this);
-
-        t.setText(value);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(12);
-        t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(9), dp(7), dp(9), dp(7));
-        t.setBackground(bg(0xEE20283A));
-
-        return t;
-    }
-
-    private WindowManager.LayoutParams params(
-            int w,
-            int h,
-            int gravity
-    ) {
-        WindowManager.LayoutParams lp =
-                new WindowManager.LayoutParams(
-                        w,
-                        h,
-                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                        PixelFormat.TRANSLUCENT
-                );
-
-        lp.gravity = gravity;
-
-        return lp;
-    }
-
-    private void createPanel() {
-        panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(5), dp(5), dp(5), dp(5));
-        panel.setBackground(bg(0xE9121722));
-
-        TextView head = label("RRM  ⋮  کشیدن برای جابه‌جایی");
-        panel.addView(head);
-
-        fpsControl = label("FPS: خاموش");
-        fpsControl.setOnClickListener(v -> toggleFps());
-        panel.addView(fpsControl);
-
-        TextView mode = label("حالت نمایش: عدد / نمودار");
-
-        mode.setOnClickListener(v -> {
-            graphMode = !graphMode;
-            renderFps();
-
-            mode.setText(
-                    graphMode ? "نمایش نمودار" : "نمایش عددی"
-            );
-        });
-
-        panel.addView(mode);
-
-        touchControl = label("دکمه لمسی: خاموش");
-        touchControl.setOnClickListener(v -> toggleTouch());
-        panel.addView(touchControl);
-
-        TextView close = label("بستن پنل");
-        close.setOnClickListener(v -> stopSelf());
-        panel.addView(close);
-
-        panelLp = params(-2, -2, Gravity.TOP | Gravity.START);
-        panelLp.x = dp(12);
-        panelLp.y = dp(100);
-
-        wm.addView(panel, panelLp);
-        makeDraggable(head, panelLp);
-    }
-
-    private void createFps() {
-        fpsView = label("FPS: خاموش");
-
-        fpsLp = params(-2, -2, Gravity.TOP | Gravity.END);
-        fpsLp.x = dp(12);
-        fpsLp.y = dp(80);
-
-        graphView = new FpsGraphView(this);
-        graphView.setMinimumWidth(dp(170));
-        graphView.setMinimumHeight(dp(72));
-    }
-
-    private void renderFps() {
-        if (fpsView == null) return;
-
-        int last = samples.isEmpty()
-                ? -1
-                : samples.peekLast();
-
-        fpsView.setText(
-                last < 0 ? "FPS: --" : "FPS: " + last
-        );
-
-        graphView.setValues(
-                new java.util.ArrayList<>(samples)
-        );
-
-        if (fpsEnabled) {
-            View desired = graphMode ? graphView : fpsView;
-            View other = graphMode ? fpsView : graphView;
-
-            if (other.getParent() != null) {
-                wm.removeView(other);
-            }
-
-            if (desired.getParent() == null) {
-                wm.addView(desired, fpsLp);
-            }
-        }
-    }
-
-    private void toggleFps() {
-        fpsEnabled = !fpsEnabled;
-
-        if (fpsControl != null) {
-            fpsControl.setText(
-                    fpsEnabled ? "FPS: روشن" : "FPS: خاموش"
-            );
-        }
-
-        if (fpsEnabled) {
-            samples.clear();
-            renderFps();
-            handler.post(poll);
-
-        } else {
-            handler.removeCallbacks(poll);
-
-            if (fpsView.getParent() != null) {
-                wm.removeView(fpsView);
-            }
-
-            if (graphView.getParent() != null) {
-                wm.removeView(graphView);
-            }
-        }
-    }
-
-    private void createTouchButton() {
-        android.content.SharedPreferences prefs =
-                getSharedPreferences("gaming", MODE_PRIVATE);
-
-        int size = prefs.getInt("touch_size", 100);
-        int opacity = prefs.getInt("touch_opacity", 75);
-
-        String shape = prefs.getString("touch_shape", "TAP");
-        int color = prefs.getInt("touch_color", 0xFF2B8A70);
-
-        touchView = label(shape);
-        touchView.setTextSize(14);
-        touchView.setBackground(bg(color));
-        touchView.setAlpha(opacity / 100f);
-
-        int px = dp(Math.max(40, Math.min(140, 64 * size / 100)));
-
-        touchLp = params(px, px, Gravity.TOP | Gravity.START);
-        touchLp.x = dp(260);
-        touchLp.y = dp(420);
-
-        touchView.setOnTouchListener((v, e) -> {
-
-            if (e.getAction() == MotionEvent.ACTION_DOWN) {
-                touchDownX = (int) e.getRawX();
-                touchDownY = (int) e.getRawY();
-
-                startX = touchLp.x;
-                startY = touchLp.y;
-
-                return true;
-            }
-
-            if (e.getAction() == MotionEvent.ACTION_MOVE) {
-                touchLp.x = startX
-                        + (int) e.getRawX() - touchDownX;
-
-                touchLp.y = startY
-                        + (int) e.getRawY() - touchDownY;
-
-                wm.updateViewLayout(touchView, touchLp);
-                return true;
-            }
-
-            if (e.getAction() == MotionEvent.ACTION_UP) {
-                int dx = Math.abs(
-                        (int) e.getRawX() - touchDownX
-                );
-
-                int dy = Math.abs(
-                        (int) e.getRawY() - touchDownY
-                );
-
-                if (dx < 12 && dy < 12) {
-                    TouchAccessibilityService svc =
-                            TouchAccessibilityService.instance;
-
-                    if (svc == null) {
-                        Toast.makeText(
-                                this,
-                                "ابتدا سرویس دسترس‌پذیری RRM را فعال کن.",
-                                Toast.LENGTH_LONG
-                        ).show();
-
-                    } else {
-                        int x = getSharedPreferences(
-                                "gaming", MODE_PRIVATE
-                        ).getInt("target_x", 50);
-
-                        int y = getSharedPreferences(
-                                "gaming", MODE_PRIVATE
-                        ).getInt("target_y", 50);
-
-                        svc.tapPercent(x, y);
-                    }
-                }
-
-                return true;
-            }
-
-            return true;
-        });
-    }
-
-    private void toggleTouch() {
-        touchEnabled = !touchEnabled;
-
-        if (touchControl != null) {
-            touchControl.setText(
-                    touchEnabled
-                            ? "دکمه لمسی: روشن"
-                            : "دکمه لمسی: خاموش"
-            );
-        }
-
-        if (touchEnabled) {
-            if (touchView.getParent() == null) {
-                wm.addView(touchView, touchLp);
-            }
-
-        } else if (touchView.getParent() != null) {
-            wm.removeView(touchView);
-        }
-    }
-
-    private void makeDraggable(
-            View v,
-            WindowManager.LayoutParams lp
-    ) {
-        final int[] xy = new int[2];
-        final int[] raw = new int[2];
-
-        v.setOnTouchListener((view, event) -> {
-
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                xy[0] = lp.x;
-                xy[1] = lp.y;
-
-                raw[0] = (int) event.getRawX();
-                raw[1] = (int) event.getRawY();
-
-                return true;
-            }
-
-            if (event.getAction() == MotionEvent.ACTION_MOVE) {
-                lp.x = xy[0]
-                        + (int) event.getRawX() - raw[0];
-
-                lp.y = xy[1]
-                        + (int) event.getRawY() - raw[1];
-
-                wm.updateViewLayout(v, lp);
-                return true;
-            }
-
-            return event.getAction() == MotionEvent.ACTION_UP;
-        });
-    }
-
-    private int dp(int n) {
-        return (int) (
-                n * getResources().getDisplayMetrics().density + 0.5f
-        );
-    }
-
-    @Override
-    public int onStartCommand(
-            Intent intent,
-            int flags,
-            int startId
-    ) {
-        return START_STICKY;
-    }
-
-    @Override
-    public void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
-
-        if (panel != null && panel.getParent() != null) {
-            wm.removeView(panel);
-        }
-
-        if (fpsView != null && fpsView.getParent() != null) {
-            wm.removeView(fpsView);
-        }
-
-        if (graphView != null && graphView.getParent() != null) {
-            wm.removeView(graphView);
-        }
-
-        if (touchView != null && touchView.getParent() != null) {
-            wm.removeView(touchView);
-        }
-
-        super.onDestroy();
-    }
-
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-}
+name: Build Redmi Resolution Manager APK
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: 'false'
+
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-37.0" \
+            "build-tools;36.0.0"
+
+      - name: Prepare Android 37 SDK
+        shell: bash
+        run: |
+          set -e
+
+          SDK="$ANDROID_HOME"
+          SRC="$SDK/platforms/android-37.0"
+          DST="$SDK/platforms/android-37"
+
+          test -f "$SRC/android.jar"
+
+          rm -rf "$DST"
+          cp -a "$SRC" "$DST"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          root = Path(os.environ["ANDROID_HOME"]) / "platforms" / "android-37"
+
+          for name in ("source.properties", "package.xml"):
+              p = root / name
+              if p.exists():
+                  content = p.read_text()
+                  content = content.replace(
+                      "platforms;android-37.0",
+                      "platforms;android-37"
+                  )
+                  p.write_text(content)
+
+          print("Android SDK 37 prepared")
+          PY
+
+          test -f "$DST/android.jar"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Check source ZIP
+        run: |
+          set -e
+          ls -lh
+          test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
+
+      - name: Extract source
+        run: |
+          set -e
+          unzip -q Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip -d source_unpacked
+
+          test -f source_unpacked/RedmiResolutionManager/settings.gradle
+          test -f source_unpacked/RedmiResolutionManager/build.gradle
+          test -f source_unpacked/RedmiResolutionManager/app/build.gradle
+
+      - name: Configure Android and Kotlin
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("source_unpacked/RedmiResolutionManager")
+
+          # Root Gradle configuration
+          p = root / "build.gradle"
+          s = p.read_text()
+
+          s = s.replace(
+              "com.android.application' version '8.7.3'",
+              "com.android.application' version '9.1.1'"
+          )
+
+          if "com.android.application' version '9.1.1'" not in s:
+              raise SystemExit("AGP version could not be updated")
+
+          lines = [
+              line for line in s.splitlines()
+              if "org.jetbrains.kotlin.android" not in line
+          ]
+
+          s = "\n".join(lines)
+
+          marker = (
+              "id 'com.android.application' version '9.1.1' apply false"
+          )
+
+          replacement = (
+              marker
+              + "\n    id 'org.jetbrains.kotlin.android' "
+              + "version '2.4.20' apply false"
+          )
+
+          s = s.replace(marker, replacement)
+
+          if "org.jetbrains.kotlin.android" not in s:
+              raise SystemExit("Kotlin plugin configuration failed")
+
+          p.write_text(s + "\n")
+
+          # App Gradle configuration
+          p = root / "app/build.gradle"
+          s = p.read_text()
+
+          lines = [
+              line for line in s.splitlines()
+              if "org.jetbrains.kotlin.android" not in line
+          ]
+
+          s = "\n".join(lines) + "\n"
+
+          s = s.replace(
+              "id 'com.android.application'",
+              "id 'com.android.application'\n    "
+              "id 'org.jetbrains.kotlin.android'"
+          )
+
+          s = s.replace("compileSdk 35", "compileSdk 37")
+
+          if "compileSdk 37" not in s:
+              raise SystemExit("compileSdk configuration failed")
+
+          if "sourceCompatibility JavaVersion.VERSION_17" not in s:
+              s += """
+          android {
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          """
+
+          if 'jvmTarget = "17"' not in s:
+              s += """
+          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          """
+
+          p.write_text(s)
+
+          # JitPack repository
+          p = root / "settings.gradle"
+          s = p.read_text()
+
+          if "https://jitpack.io" not in s:
+              old = "repositories { google(); mavenCentral() }"
+              new = (
+                  "repositories { google(); mavenCentral(); "
+                  "maven { url 'https://jitpack.io' } }"
+              )
+
+              if old not in s:
+                  raise SystemExit("Dependency repositories not found")
+
+              s = s.replace(old, new)
+
+          p.write_text(s)
+
+          # Gradle properties
+          p = root / "gradle.properties"
+          s = p.read_text()
+
+          lines = [
+              line for line in s.splitlines()
+              if not line.startswith("android.builtInKotlin=")
+              and not line.startswith("android.newDsl=")
+          ]
+
+          lines.extend([
+              "android.builtInKotlin=false",
+              "android.newDsl=false"
+          ])
+
+          p.write_text("\n".join(lines) + "\n")
+
+          print("Build configuration completed")
+          PY
+
+      - name: Verify Java and Kotlin targets
+        run: |
+          echo "Java:"
+          java -version
+
+          echo "Gradle:"
+          gradle --version
+
+          echo "App configuration:"
+          cat source_unpacked/RedmiResolutionManager/app/build.gradle
+
+      - name: Build APK
+        shell: bash
+        run: |
+          cd source_unpacked/RedmiResolutionManager
+
+          set +e
+
+          gradle --no-daemon clean assembleDebug \
+            --stacktrace \
+            --info \
+            --console=plain \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-full.log"
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo "BUILD_STATUS=$BUILD_STATUS"
+
+          exit "$BUILD_STATUS"
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Diagnostic-Log
+          path: build-full.log
+          if-no-files-found: warn
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Redmi-Resolution-Manager-APK
+          path: source_unpacked/RedmiResolutionManager/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          
