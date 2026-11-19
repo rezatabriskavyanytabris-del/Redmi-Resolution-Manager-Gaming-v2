@@ -54,9 +54,6 @@ jobs:
           fi
 
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-          echo "Using SDK manager: $SDKMANAGER"
-
           "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
@@ -78,8 +75,6 @@ jobs:
             "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;36.0.0"
-
-          echo "Android SDK packages installed"
 
       - name: Prepare Android 37 SDK
         shell: bash
@@ -125,10 +120,8 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          ls -lah
-
           test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
+          echo "Source ZIP found"
 
       - name: Extract source
         shell: bash
@@ -149,6 +142,95 @@ jobs:
 
           echo "Source extracted successfully"
 
+      - name: Fix Java and Kotlin callbacks
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("source_unpacked/RedmiResolutionManager")
+
+          # Fix ADBBridge Kotlin callbacks for Java callers
+          p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
+          s = p.read_text()
+
+          if "import java.util.function.Consumer" not in s:
+              s = s.replace(
+                  "package com.rezadev.resolutionmanager",
+                  "package com.rezadev.resolutionmanager\n\nimport java.util.function.Consumer"
+              )
+
+          s = s.replace(
+              "success: (String) -> Unit",
+              "success: Consumer<String>"
+          )
+
+          s = s.replace(
+              "failure: (String) -> Unit",
+              "failure: Consumer<String>"
+          )
+
+          s = s.replace(
+              'success("ADB داخلی متصل شد")',
+              'success.accept("ADB داخلی متصل شد")'
+          )
+
+          s = s.replace(
+              "success(result.output)",
+              "success.accept(result.output)"
+          )
+
+          s = s.replace(
+              "failure(t.message ?: t.javaClass.simpleName)",
+              "failure.accept(t.message ?: t.javaClass.simpleName)"
+          )
+
+          if ": (String) -> Unit" in s:
+              raise SystemExit("ADBBridge callback conversion incomplete")
+
+          if "success.accept(" not in s or "failure.accept(" not in s:
+              raise SystemExit("ADBBridge callback verification failed")
+
+          p.write_text(s)
+
+          # Fix WindowManager.LayoutParams constructor
+          p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
+          s = p.read_text()
+
+          old = """    private WindowManager.LayoutParams params(int w, int h, int gravity) {
+                return new WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT, gravity);
+            }"""
+
+          new = """    private WindowManager.LayoutParams params(int w, int h, int gravity) {
+                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    w,
+                    h,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                );
+                lp.gravity = gravity;
+                return lp;
+            }"""
+
+          if old not in s:
+              raise SystemExit("FloatingGamingService constructor pattern not found")
+
+          s = s.replace(old, new)
+
+          if "PixelFormat.TRANSLUCENT, gravity);" in s:
+              raise SystemExit("Old LayoutParams constructor still exists")
+
+          p.write_text(s)
+
+          print("Java/Kotlin callback fixes applied")
+          print("LayoutParams constructor fixed")
+          PY
+
       - name: Configure Android and Kotlin
         shell: bash
         run: |
@@ -159,6 +241,7 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
+          # Root Gradle configuration
           p = root / "build.gradle"
           s = p.read_text()
 
@@ -194,6 +277,7 @@ jobs:
 
           p.write_text(s + "\n")
 
+          # App Gradle configuration
           p = root / "app/build.gradle"
           s = p.read_text()
 
@@ -236,6 +320,7 @@ jobs:
 
           p.write_text(s)
 
+          # JitPack repository
           p = root / "settings.gradle"
           s = p.read_text()
 
@@ -254,6 +339,7 @@ jobs:
 
           p.write_text(s)
 
+          # Gradle properties
           p = root / "gradle.properties"
           s = p.read_text()
 
@@ -270,21 +356,23 @@ jobs:
 
           p.write_text("\n".join(lines) + "\n")
 
-          print("Project configuration completed")
+          print("Gradle configuration completed")
           PY
 
-      - name: Verify build environment
+      - name: Verify source fixes
         shell: bash
         run: |
           set -e
 
-          java -version
-          gradle --version
+          ROOT="source_unpacked/RedmiResolutionManager"
 
-          echo "Android platforms:"
-          ls "$ANDROID_HOME/platforms"
+          grep -n "Consumer<String>" \
+            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
 
-          cat source_unpacked/RedmiResolutionManager/app/build.gradle
+          grep -n "lp.gravity = gravity" \
+            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
+
+          echo "Source verification passed"
 
       - name: Build APK
         shell: bash
