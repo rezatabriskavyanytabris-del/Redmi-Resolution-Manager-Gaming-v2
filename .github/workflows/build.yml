@@ -104,7 +104,7 @@ jobs:
 
           s = s.replace(
               "id 'com.android.application' version '9.1.1' apply false",
-              "id 'com.android.application' version '9.1.1' apply false\n    id 'org.jetbrains.kotlin.android' version '2.4.20' apply false"
+              "id 'com.android.application' version '9.1.1' apply false\n id 'org.jetbrains.kotlin.android' version '2.4.20' apply false"
           )
 
           if "org.jetbrains.kotlin.android" not in s:
@@ -124,7 +124,7 @@ jobs:
 
           s = s.replace(
               "id 'com.android.application'",
-              "id 'com.android.application'\n    id 'org.jetbrains.kotlin.android'"
+              "id 'com.android.application'\n id 'org.jetbrains.kotlin.android'"
           )
 
           s = s.replace("compileSdk 35", "compileSdk 37")
@@ -169,15 +169,35 @@ jobs:
         run: |
           echo "Root build.gradle:"
           cat source_unpacked/RedmiResolutionManager/build.gradle
+
           echo "App build.gradle:"
           cat source_unpacked/RedmiResolutionManager/app/build.gradle
+
           echo "Gradle properties:"
           cat source_unpacked/RedmiResolutionManager/gradle.properties
 
-      - name: Build APK
+      - name: Build APK and collect diagnostics
         run: |
           cd source_unpacked/RedmiResolutionManager
-          gradle --no-daemon clean assembleDebug
+
+          set +e
+          gradle --no-daemon clean assembleDebug --stacktrace --info --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build-full.log"
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo "BUILD_STATUS=$BUILD_STATUS"
+
+          grep -n -E "e: |error:|Unresolved reference|What went wrong|Compilation error" "$GITHUB_WORKSPACE/build-full.log" || true
+
+          exit "$BUILD_STATUS"
+
+      - name: Upload build diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Diagnostic-Log
+          path: build-full.log
+          if-no-files-found: warn
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
