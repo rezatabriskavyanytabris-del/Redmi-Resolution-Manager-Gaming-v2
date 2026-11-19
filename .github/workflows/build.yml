@@ -50,6 +50,24 @@ jobs:
           test -f source_unpacked/RedmiResolutionManager/settings.gradle
           test -f source_unpacked/RedmiResolutionManager/app/build.gradle
 
+      - name: Add JitPack repository
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("source_unpacked/RedmiResolutionManager/settings.gradle")
+          s = p.read_text()
+
+          old = "repositories { google(); mavenCentral() }"
+          new = "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
+
+          if s.count(old) != 1:
+              raise SystemExit("Expected repository configuration not found")
+
+          p.write_text(s.replace(old, new))
+          print("JitPack repository added successfully")
+          PY
+
       - name: Build APK
         run: |
           cd source_unpacked/RedmiResolutionManager
