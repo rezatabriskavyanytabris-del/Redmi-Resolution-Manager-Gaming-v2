@@ -16,20 +16,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==========================================
+      # 1. CHECKOUT
+      # ==========================================
+
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      # ==========================================
+      # 2. INITIALIZE DIAGNOSTIC LOG
+      # ==========================================
 
       - name: Initialize diagnostic log
         shell: bash
         run: |
+          mkdir -p diagnostics
+
           {
-            echo "Redmi Resolution Manager - Build Diagnostic Log"
+            echo "Redmi Resolution Manager - FULL BUILD DIAGNOSTIC LOG"
             echo "Started: $(date -u)"
             echo "Repository: $GITHUB_REPOSITORY"
             echo "Commit: $GITHUB_SHA"
+            echo "Branch: $GITHUB_REF"
             echo "Runner: $RUNNER_OS"
             echo "----------------------------------------"
-          } > build-full.log
+          } > "$GITHUB_WORKSPACE/build-full.log"
+
+      # ==========================================
+      # 3. SETUP JAVA
+      # ==========================================
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
@@ -37,10 +52,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # ==========================================
+      # 4. SETUP GRADLE
+      # ==========================================
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+
+      # ==========================================
+      # 5. INSTALL AND CONFIGURE ANDROID SDK
+      # ==========================================
 
       - name: Install Android SDK
         shell: bash
@@ -49,17 +72,24 @@ jobs:
 
           {
             echo "===== ANDROID SDK INSTALLATION ====="
+            echo "Date: $(date -u)"
 
             SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+
             export ANDROID_HOME="$SDK_ROOT"
             export ANDROID_SDK_ROOT="$SDK_ROOT"
 
-            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+            echo "SDK ROOT: $SDK_ROOT"
+
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+              -type f -name sdkmanager -print -quit)"
 
             if [ -z "$SDKMANAGER" ]; then
               echo "ERROR: sdkmanager not found"
               exit 1
             fi
+
+            echo "SDKMANAGER: $SDKMANAGER"
 
             echo "Accepting Android SDK licenses..."
 
@@ -72,6 +102,8 @@ jobs:
               echo "ERROR: SDK license acceptance failed"
               exit "$LICENSE_STATUS"
             fi
+
+            echo "SDK licenses accepted successfully"
 
             echo "Installing Android SDK packages..."
 
@@ -88,15 +120,25 @@ jobs:
               exit "$INSTALL_STATUS"
             fi
 
+            echo "Checking Android 37 platform directory..."
+
             if [ -d "$SDK_ROOT/platforms/android-37.0" ]; then
               mkdir -p "$SDK_ROOT/platforms/android-37"
+
               cp -a "$SDK_ROOT/platforms/android-37.0/." \
                 "$SDK_ROOT/platforms/android-37/"
             fi
 
-            echo "Android SDK installation completed"
+            echo "Installed SDK packages:"
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" --list_installed
 
-          } 2>&1 | tee -a build-full.log
+            echo "Android SDK installation completed successfully"
+
+          } 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
+
+      # ==========================================
+      # 6. EXTRACT ORIGINAL SOURCE ZIP
+      # ==========================================
 
       - name: Extract source ZIP
         shell: bash
@@ -105,45 +147,71 @@ jobs:
 
           {
             echo "===== SOURCE EXTRACTION ====="
+            echo "Searching for original source ZIP..."
 
-            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 \
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+              -maxdepth 3 \
               -type f \
               -name 'Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip' \
               -print -quit)"
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "ERROR: Source ZIP was not found"
+              echo "ERROR: Original source ZIP was not found"
+              echo "Files in repository:"
+              find "$GITHUB_WORKSPACE" -maxdepth 4 -type f
               exit 1
             fi
 
             echo "Source ZIP: $ZIP_FILE"
 
-            mkdir -p source_unpacked
-            unzip -q "$ZIP_FILE" -d source_unpacked
+            mkdir -p "$GITHUB_WORKSPACE/source_unpacked"
 
-            PROJECT_DIR="source_unpacked/RedmiResolutionManager"
+            unzip -q "$ZIP_FILE" \
+              -d "$GITHUB_WORKSPACE/source_unpacked"
+
+            PROJECT_DIR="$GITHUB_WORKSPACE/source_unpacked/RedmiResolutionManager"
 
             if [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
               echo "ERROR: Project directory is invalid"
-              find source_unpacked -maxdepth 4 -type f
+              find "$GITHUB_WORKSPACE/source_unpacked" \
+                -maxdepth 5 -type f
               exit 1
             fi
 
             echo "Project extracted successfully"
+            echo "Project directory: $PROJECT_DIR"
 
-          } 2>&1 | tee -a build-full.log
+            echo "Project files:"
+            find "$PROJECT_DIR" -maxdepth 3 -type f
+
+          } 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
+
+      # ==========================================
+      # 7. PATCH ORIGINAL SOURCE FILES
+      # ==========================================
 
       - name: Patch source files
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+
+          python3 - <<'PY' 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
           from pathlib import Path
           import re
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
+          print("===== SOURCE PATCHING =====")
+
+          # ------------------------------------------
+          # ADBBridge Kotlin callback patch
+          # ------------------------------------------
+
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
+
+          if not p.exists():
+              raise SystemExit(f"ERROR: File not found: {p}")
+
           s = p.read_text()
 
           if "import java.util.function.Consumer" not in s:
@@ -159,18 +227,31 @@ jobs:
               s
           )
 
-          s = re.sub(r'\b(success|failure)\(', r'\1.accept(', s)
+          s = re.sub(
+              r'\b(success|failure)\(',
+              r'\1.accept(',
+              s
+          )
 
           if "success: Consumer<String>" not in s:
-              raise SystemExit("ADBBridge success callback patch failed")
+              raise SystemExit("ERROR: ADBBridge success callback patch failed")
 
           if "failure: Consumer<String>" not in s:
-              raise SystemExit("ADBBridge failure callback patch failed")
+              raise SystemExit("ERROR: ADBBridge failure callback patch failed")
 
           p.write_text(s)
-          print("ADBBridge.kt patched")
+
+          print("ADBBridge.kt patched successfully")
+
+          # ------------------------------------------
+          # FloatingGamingService Java patch
+          # ------------------------------------------
 
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
+
+          if not p.exists():
+              raise SystemExit(f"ERROR: File not found: {p}")
+
           s = p.read_text()
 
           pattern = re.compile(
@@ -181,7 +262,9 @@ jobs:
           match = pattern.search(s)
 
           if not match:
-              raise SystemExit("FloatingGamingService params method not found")
+              raise SystemExit(
+                  "ERROR: FloatingGamingService params method not found"
+              )
 
           start = match.end()
           depth = 1
@@ -192,10 +275,13 @@ jobs:
                   depth += 1
               elif s[end] == "}":
                   depth -= 1
+
               end += 1
 
           if depth != 0:
-              raise SystemExit("FloatingGamingService braces invalid")
+              raise SystemExit(
+                  "ERROR: FloatingGamingService braces are invalid"
+              )
 
           body = """
               WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
@@ -211,13 +297,24 @@ jobs:
           """
 
           s = s[:start] + body + s[end - 1:]
+
           p.write_text(s)
-          print("FloatingGamingService.java patched")
+
+          print("FloatingGamingService.java patched successfully")
+
+          # ------------------------------------------
+          # MainActivity lambda patch
+          # ------------------------------------------
 
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
+
+          if not p.exists():
+              raise SystemExit(f"ERROR: File not found: {p}")
+
           s = p.read_text()
 
           if "final int finalCount = count;" not in s:
+
               needle = (
                   '        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }\n'
                   '        new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'
@@ -230,45 +327,73 @@ jobs:
               )
 
               if needle not in s:
-                  raise SystemExit("MainActivity insertion point not found")
+                  raise SystemExit(
+                      "ERROR: MainActivity insertion point not found"
+                  )
 
               s = s.replace(needle, replacement, 1)
 
           old_lambda = '"درخواست توقف برای " + count + " برنامه ارسال شد."'
+
           new_lambda = '"درخواست توقف برای " + finalCount + " برنامه ارسال شد."'
 
           if old_lambda in s:
               s = s.replace(old_lambda, new_lambda, 1)
 
           if new_lambda not in s:
-              raise SystemExit("MainActivity lambda verification failed")
+              raise SystemExit(
+                  "ERROR: MainActivity lambda verification failed"
+              )
 
           p.write_text(s)
-          print("MainActivity.java patched")
-          print("All source patches completed")
+
+          print("MainActivity.java patched successfully")
+
+          print("All source patches completed successfully")
+
           PY
+
+      # ==========================================
+      # 8. CONFIGURE GRADLE
+      # ==========================================
 
       - name: Configure Gradle
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+
+          python3 - <<'PY' 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
           from pathlib import Path
           import re
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
+          print("===== GRADLE CONFIGURATION =====")
+
+          # ------------------------------------------
+          # Root build.gradle
+          # ------------------------------------------
+
           p = root / "build.gradle"
+
           p.write_text("""plugins {
               id 'com.android.application' version '9.1.1' apply false
               id 'org.jetbrains.kotlin.android' version '2.4.20' apply false
           }
           """)
 
+          print("Root build.gradle configured")
+
+          # ------------------------------------------
+          # settings.gradle and JitPack
+          # ------------------------------------------
+
           p = root / "settings.gradle"
+
           s = p.read_text()
 
           if "https://jitpack.io" not in s:
+
               s = s.replace(
                   "repositories { google(); mavenCentral() }",
                   "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
@@ -276,25 +401,47 @@ jobs:
 
           p.write_text(s)
 
+          print("settings.gradle configured")
+
+          # ------------------------------------------
+          # gradle.properties
+          # ------------------------------------------
+
           p = root / "gradle.properties"
-          s = p.read_text()
+
+          s = p.read_text() if p.exists() else ""
 
           for line in (
               "android.builtInKotlin=false",
               "android.newDsl=false"
           ):
+
               if line not in s:
                   s += "\n" + line
 
           p.write_text(s)
 
+          print("gradle.properties configured")
+
+          # ------------------------------------------
+          # app/build.gradle
+          # ------------------------------------------
+
           p = root / "app/build.gradle"
+
           s = p.read_text()
 
-          s = re.sub(r'compileSdk\s+\d+', 'compileSdk 37', s, count=1)
+          s = re.sub(
+              r'compileSdk\s+\d+',
+              'compileSdk 37',
+              s,
+              count=1
+          )
 
           if "sourceCompatibility JavaVersion.VERSION_17" not in s:
+
               s += """
+
           android {
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -304,7 +451,9 @@ jobs:
           """
 
           if 'jvmTarget = "17"' not in s:
+
               s += """
+
           tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
               kotlinOptions {
                   jvmTarget = "17"
@@ -313,49 +462,160 @@ jobs:
           """
 
           p.write_text(s)
-          print("Gradle configuration completed")
+
+          print("app/build.gradle configured")
+
+          print("Gradle configuration completed successfully")
+
           PY
+
+      # ==========================================
+      # 9. BUILD APK
+      # ==========================================
 
       - name: Build APK
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           {
+            echo "========================================"
             echo "===== BUILD START ====="
+            echo "Date: $(date -u)"
+            echo "========================================"
+
+            echo "===== JAVA VERSION ====="
             java -version
+
+            echo "===== GRADLE VERSION ====="
             gradle --version
 
-            cd source_unpacked/RedmiResolutionManager
+            echo "===== ANDROID ENVIRONMENT ====="
+            echo "ANDROID_HOME: $ANDROID_HOME"
+            echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+
+            echo "===== PROJECT BUILD ====="
+
+            cd "$GITHUB_WORKSPACE/source_unpacked/RedmiResolutionManager"
 
             gradle --no-daemon clean assembleDebug \
-              --stacktrace --info --console=plain
+              --stacktrace \
+              --info \
+              --warning-mode all \
+              --console=plain
 
             echo "===== APK OUTPUT ====="
-            find app/build/outputs/apk -type f -name '*.apk' -print
+
+            find app/build/outputs/apk \
+              -type f \
+              -name '*.apk' \
+              -print
 
             echo "===== BUILD SUCCESS ====="
 
           } 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
 
-      - name: Finalize diagnostic log
+      # ==========================================
+      # 10. COLLECT DIAGNOSTICS
+      # ALWAYS RUNS EVEN IF BUILD FAILS
+      # ==========================================
+
+      - name: Collect full diagnostics
         if: always()
         shell: bash
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+
+          LOG="$GITHUB_WORKSPACE/build-full.log"
+
+          if [ ! -f "$LOG" ]; then
+            echo "Diagnostic log was missing; creating fallback log."
+            touch "$LOG"
+          fi
+
           {
-            echo "----------------------------------------"
+            echo ""
+            echo "========================================"
+            echo "===== FINAL DIAGNOSTIC INFORMATION ====="
+            echo "========================================"
+
             echo "Finished: $(date -u)"
             echo "Job status: ${{ job.status }}"
-          } >> build-full.log
+            echo "Runner: $RUNNER_OS"
+            echo "Commit: $GITHUB_SHA"
+
+            echo ""
+            echo "===== JAVA INFORMATION ====="
+            java -version 2>&1 || true
+
+            echo ""
+            echo "===== GRADLE DAEMON LOG FILES ====="
+
+            if [ -d "$HOME/.gradle/daemon" ]; then
+              find "$HOME/.gradle/daemon" \
+                -type f \
+                -name '*.out.log' \
+                -print
+            fi
+
+            echo ""
+            echo "===== BUILD ERROR KEYWORDS ====="
+
+            grep -n -i -E \
+              "what went wrong|execution failed|caused by:|duplicate|already added|error:|failed" \
+              "$LOG" | tail -n 150 || true
+
+            echo ""
+            echo "===== APK FILE CHECK ====="
+
+            if [ -d "$GITHUB_WORKSPACE/source_unpacked/RedmiResolutionManager/app/build/outputs/apk" ]; then
+              find "$GITHUB_WORKSPACE/source_unpacked/RedmiResolutionManager/app/build/outputs/apk" \
+                -type f -name '*.apk' -print
+            else
+              echo "APK output directory does not exist."
+            fi
+
+            echo ""
+            echo "===== END OF DIAGNOSTICS ====="
+
+          } >> "$LOG" 2>&1
+
+          cp "$LOG" "$GITHUB_WORKSPACE/diagnostics/build-full.log"
+
+          if [ -d "$HOME/.gradle/daemon/9.3.1" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/diagnostics/gradle-daemon"
+
+            find "$HOME/.gradle/daemon/9.3.1" \
+              -type f \
+              -name '*.out.log' \
+              -exec cp {} "$GITHUB_WORKSPACE/diagnostics/gradle-daemon/" \;
+          fi
+
+          echo "Diagnostic files collected."
+
+          echo "Main log size:"
+          wc -c "$GITHUB_WORKSPACE/diagnostics/build-full.log"
+
+      # ==========================================
+      # 11. UPLOAD FULL DIAGNOSTIC LOG
+      # ALWAYS RUNS
+      # ==========================================
 
       - name: Upload diagnostic log
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: Build-Diagnostic-Log
-          path: build-full.log
-          if-no-files-found: warn
+          path: |
+            diagnostics/
+            build-full.log
+          if-no-files-found: error
           retention-days: 14
+
+      # ==========================================
+      # 12. UPLOAD APK
+      # ONLY AFTER SUCCESSFUL BUILD
+      # ==========================================
 
       - name: Upload APK
         if: success()
