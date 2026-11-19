@@ -38,6 +38,23 @@ jobs:
         run: |
           sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
 
+      - name: Fix Android 37 SDK directory
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME/platforms/"
+
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ]; then
+            if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+              ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+            fi
+          else
+            echo "Android 37.0 SDK was not installed"
+            exit 1
+          fi
+
+          test -d "$ANDROID_HOME/platforms/android-37"
+          echo "Android 37 SDK path fixed successfully"
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -82,7 +99,6 @@ jobs:
 
           p = root / "gradle.properties"
           s = p.read_text()
-          s = s.replace("\nandroid.builtInKotlin=false\n", "\n")
           s = s.replace("android.builtInKotlin=false\n", "")
           p.write_text(s)
 
