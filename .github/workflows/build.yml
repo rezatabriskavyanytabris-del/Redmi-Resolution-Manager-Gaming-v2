@@ -41,23 +41,23 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
-          echo "Android SDK: $SDK_ROOT"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
-          test -d "$SDK_ROOT/cmdline-tools"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+              -type f -name sdkmanager | sort -V | tail -n 1)"
+          fi
 
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
-            -type f -name sdkmanager | sort -V | tail -n 1)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager was not found"
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
             exit 1
           fi
 
-          chmod +x "$SDKMANAGER"
-
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
 
-          echo "Found: $SDKMANAGER"
+          echo "Using SDK manager: $SDKMANAGER"
+
+          "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
         shell: bash
@@ -126,12 +126,9 @@ jobs:
         run: |
           set -e
 
-          echo "Repository files:"
           ls -lah
 
           test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
-
-          echo "Source ZIP found"
 
       - name: Extract source
         shell: bash
@@ -162,7 +159,6 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # Root Gradle configuration
           p = root / "build.gradle"
           s = p.read_text()
 
@@ -198,7 +194,6 @@ jobs:
 
           p.write_text(s + "\n")
 
-          # App Gradle configuration
           p = root / "app/build.gradle"
           s = p.read_text()
 
@@ -241,7 +236,6 @@ jobs:
 
           p.write_text(s)
 
-          # JitPack repository
           p = root / "settings.gradle"
           s = p.read_text()
 
@@ -260,7 +254,6 @@ jobs:
 
           p.write_text(s)
 
-          # Gradle properties
           p = root / "gradle.properties"
           s = p.read_text()
 
@@ -288,10 +281,9 @@ jobs:
           java -version
           gradle --version
 
-          echo "Android SDK:"
+          echo "Android platforms:"
           ls "$ANDROID_HOME/platforms"
 
-          echo "App Gradle configuration:"
           cat source_unpacked/RedmiResolutionManager/app/build.gradle
 
       - name: Build APK
