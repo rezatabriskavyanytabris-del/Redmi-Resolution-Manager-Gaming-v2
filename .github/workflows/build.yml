@@ -14,11 +14,16 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
+      - name: Prepare diagnostic log
+        run: |
+          touch build-full.log
+          echo "Build started" | tee -a build-full.log
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -26,29 +31,63 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: 'false'
+      - name: Locate Android SDK
+        shell: bash
+        run: |
+          set -e
 
-      - name: Accept SDK licenses
-        run: yes | sdkmanager --licenses || true
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "Android SDK: $SDK_ROOT"
+
+          test -d "$SDK_ROOT/cmdline-tools"
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f -name sdkmanager | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager was not found"
+            exit 1
+          fi
+
+          chmod +x "$SDKMANAGER"
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Found: $SDKMANAGER"
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set +e
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --licenses
+          true
 
       - name: Install Android SDK packages
+        shell: bash
         run: |
-          sdkmanager \
+          set -e
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
             "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;36.0.0"
+
+          echo "Android SDK packages installed"
 
       - name: Prepare Android 37 SDK
         shell: bash
         run: |
           set -e
 
-          SDK="$ANDROID_HOME"
-          SRC="$SDK/platforms/android-37.0"
-          DST="$SDK/platforms/android-37"
+          SRC="$ANDROID_HOME/platforms/android-37.0"
+          DST="$ANDROID_HOME/platforms/android-37"
 
           test -f "$SRC/android.jar"
 
@@ -63,6 +102,7 @@ jobs:
 
           for name in ("source.properties", "package.xml"):
               p = root / name
+
               if p.exists():
                   content = p.read_text()
                   content = content.replace(
@@ -71,7 +111,7 @@ jobs:
                   )
                   p.write_text(content)
 
-          print("Android SDK 37 prepared")
+          print("Android 37 SDK prepared")
           PY
 
           test -f "$DST/android.jar"
@@ -82,19 +122,35 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Check source ZIP
+        shell: bash
         run: |
           set -e
-          ls -lh
+
+          echo "Repository files:"
+          ls -lah
+
           test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
 
+          echo "Source ZIP found"
+
       - name: Extract source
+        shell: bash
         run: |
           set -e
-          unzip -q Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip -d source_unpacked
 
-          test -f source_unpacked/RedmiResolutionManager/settings.gradle
-          test -f source_unpacked/RedmiResolutionManager/build.gradle
-          test -f source_unpacked/RedmiResolutionManager/app/build.gradle
+          mkdir -p source_unpacked
+
+          unzip -q \
+            Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip \
+            -d source_unpacked
+
+          ROOT="source_unpacked/RedmiResolutionManager"
+
+          test -f "$ROOT/settings.gradle"
+          test -f "$ROOT/build.gradle"
+          test -f "$ROOT/app/build.gradle"
+
+          echo "Source extracted successfully"
 
       - name: Configure Android and Kotlin
         shell: bash
@@ -116,7 +172,7 @@ jobs:
           )
 
           if "com.android.application' version '9.1.1'" not in s:
-              raise SystemExit("AGP version could not be updated")
+              raise SystemExit("Could not configure Android Gradle Plugin")
 
           lines = [
               line for line in s.splitlines()
@@ -191,6 +247,7 @@ jobs:
 
           if "https://jitpack.io" not in s:
               old = "repositories { google(); mavenCentral() }"
+
               new = (
                   "repositories { google(); mavenCentral(); "
                   "maven { url 'https://jitpack.io' } }"
@@ -220,18 +277,21 @@ jobs:
 
           p.write_text("\n".join(lines) + "\n")
 
-          print("Build configuration completed")
+          print("Project configuration completed")
           PY
 
-      - name: Verify Java and Kotlin targets
+      - name: Verify build environment
+        shell: bash
         run: |
-          echo "Java:"
-          java -version
+          set -e
 
-          echo "Gradle:"
+          java -version
           gradle --version
 
-          echo "App configuration:"
+          echo "Android SDK:"
+          ls "$ANDROID_HOME/platforms"
+
+          echo "App Gradle configuration:"
           cat source_unpacked/RedmiResolutionManager/app/build.gradle
 
       - name: Build APK
@@ -255,7 +315,7 @@ jobs:
 
       - name: Upload diagnostic log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Build-Diagnostic-Log
           path: build-full.log
@@ -263,7 +323,7 @@ jobs:
 
       - name: Upload APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Redmi-Resolution-Manager-APK
           path: source_unpacked/RedmiResolutionManager/app/build/outputs/apk/debug/*.apk
