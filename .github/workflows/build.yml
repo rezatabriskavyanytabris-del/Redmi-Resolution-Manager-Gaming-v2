@@ -54,15 +54,19 @@ jobs:
           fi
 
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Using SDK manager: $SDKMANAGER"
           "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
         shell: bash
         run: |
           set +e
+
           yes | "$SDKMANAGER" \
             --sdk_root="$ANDROID_HOME" \
             --licenses
+
           true
 
       - name: Install Android SDK packages
@@ -75,6 +79,8 @@ jobs:
             "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;36.0.0"
+
+          echo "Android SDK packages installed"
 
       - name: Prepare Android 37 SDK
         shell: bash
@@ -120,7 +126,11 @@ jobs:
         shell: bash
         run: |
           set -e
+
+          ls -lah
+
           test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
+
           echo "Source ZIP found"
 
       - name: Extract source
@@ -152,7 +162,7 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # Fix ADBBridge Kotlin callbacks for Java callers
+          # Fix Kotlin callbacks so Java can call them using Java lambdas.
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
           s = p.read_text()
 
@@ -187,48 +197,73 @@ jobs:
               "failure.accept(t.message ?: t.javaClass.simpleName)"
           )
 
-          if ": (String) -> Unit" in s:
-              raise SystemExit("ADBBridge callback conversion incomplete")
+          if "success: (String) -> Unit" in s:
+              raise SystemExit("Success callback conversion failed")
+
+          if "failure: (String) -> Unit" in s:
+              raise SystemExit("Failure callback conversion failed")
 
           if "success.accept(" not in s or "failure.accept(" not in s:
-              raise SystemExit("ADBBridge callback verification failed")
+              raise SystemExit("Callback verification failed")
 
           p.write_text(s)
 
-          # Fix WindowManager.LayoutParams constructor
+          # Fix WindowManager.LayoutParams constructor.
+          # Find the method and replace its entire body safely.
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
           s = p.read_text()
 
-          old = """    private WindowManager.LayoutParams params(int w, int h, int gravity) {
-                return new WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT, gravity);
-            }"""
+          marker = "private WindowManager.LayoutParams params("
+          start = s.find(marker)
 
-          new = """    private WindowManager.LayoutParams params(int w, int h, int gravity) {
-                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    w,
-                    h,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT
-                );
-                lp.gravity = gravity;
-                return lp;
-            }"""
+          if start == -1:
+              raise SystemExit("LayoutParams method not found")
 
-          if old not in s:
-              raise SystemExit("FloatingGamingService constructor pattern not found")
+          opening = s.find("{", start)
 
-          s = s.replace(old, new)
+          if opening == -1:
+              raise SystemExit("LayoutParams method body not found")
+
+          depth = 0
+          end = -1
+
+          for i in range(opening, len(s)):
+              if s[i] == "{":
+                  depth += 1
+              elif s[i] == "}":
+                  depth -= 1
+
+                  if depth == 0:
+                      end = i + 1
+                      break
+
+          if end == -1:
+              raise SystemExit("LayoutParams method body is incomplete")
+
+          replacement = """private WindowManager.LayoutParams params(int w, int h, int gravity) {
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                      w,
+                      h,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  );
+                  lp.gravity = gravity;
+                  return lp;
+              }"""
+
+          s = s[:start] + replacement + s[end:]
 
           if "PixelFormat.TRANSLUCENT, gravity);" in s:
-              raise SystemExit("Old LayoutParams constructor still exists")
+              raise SystemExit("Old LayoutParams constructor remains")
+
+          if "lp.gravity = gravity;" not in s:
+              raise SystemExit("LayoutParams gravity verification failed")
 
           p.write_text(s)
 
-          print("Java/Kotlin callback fixes applied")
-          print("LayoutParams constructor fixed")
+          print("ADBBridge callbacks fixed")
+          print("FloatingGamingService constructor fixed")
           PY
 
       - name: Configure Android and Kotlin
@@ -251,7 +286,7 @@ jobs:
           )
 
           if "com.android.application' version '9.1.1'" not in s:
-              raise SystemExit("Could not configure Android Gradle Plugin")
+              raise SystemExit("Android Gradle Plugin configuration failed")
 
           lines = [
               line for line in s.splitlines()
@@ -324,16 +359,16 @@ jobs:
           p = root / "settings.gradle"
           s = p.read_text()
 
+          old = "repositories { google(); mavenCentral() }"
+
           if "https://jitpack.io" not in s:
-              old = "repositories { google(); mavenCentral() }"
+              if old not in s:
+                  raise SystemExit("Dependency repositories not found")
 
               new = (
                   "repositories { google(); mavenCentral(); "
                   "maven { url 'https://jitpack.io' } }"
               )
-
-              if old not in s:
-                  raise SystemExit("Dependency repositories not found")
 
               s = s.replace(old, new)
 
@@ -369,10 +404,27 @@ jobs:
           grep -n "Consumer<String>" \
             "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
 
+          grep -n "success.accept" \
+            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
+
           grep -n "lp.gravity = gravity" \
             "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
 
           echo "Source verification passed"
+
+      - name: Verify build environment
+        shell: bash
+        run: |
+          set -e
+
+          java -version
+          gradle --version
+
+          echo "Android platforms:"
+          ls "$ANDROID_HOME/platforms"
+
+          echo "App Gradle configuration:"
+          cat source_unpacked/RedmiResolutionManager/app/build.gradle
 
       - name: Build APK
         shell: bash
