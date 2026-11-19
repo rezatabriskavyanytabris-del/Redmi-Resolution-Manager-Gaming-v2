@@ -77,49 +77,72 @@ jobs:
           test -f source_unpacked/RedmiResolutionManager/settings.gradle
           test -f source_unpacked/RedmiResolutionManager/app/build.gradle
 
-      - name: Migrate project to AGP 9 built-in Kotlin
+      - name: Configure AGP and Kotlin 2.4.20
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # Update root Android Gradle Plugin and remove separate Kotlin plugin
+          # Root Gradle plugins
           p = root / "build.gradle"
           s = p.read_text()
+
           s = s.replace(
               "com.android.application' version '8.7.3'",
               "com.android.application' version '9.1.1'"
           )
+
+          if "com.android.application' version '9.1.1'" not in s:
+              raise SystemExit("Could not configure AGP 9.1.1")
+
           lines = [
               line for line in s.splitlines()
               if "org.jetbrains.kotlin.android" not in line
           ]
-          s = "\n".join(lines) + "\n"
 
-          if "version '9.1.1'" not in s:
-              raise SystemExit("AGP 9.1.1 update failed")
-          p.write_text(s)
+          s = "\n".join(lines)
 
-          # Remove Kotlin Android plugin from app module
+          s = s.replace(
+              "id 'com.android.application' version '9.1.1' apply false",
+              "id 'com.android.application' version '9.1.1' apply false\n    id 'org.jetbrains.kotlin.android' version '2.4.20' apply false"
+          )
+
+          if "org.jetbrains.kotlin.android" not in s:
+              raise SystemExit("Could not add Kotlin 2.4.20 plugin")
+
+          p.write_text(s + "\n")
+
+          # App module plugins and SDK
           p = root / "app/build.gradle"
           s = p.read_text()
+
           lines = [
               line for line in s.splitlines()
               if "org.jetbrains.kotlin.android" not in line
           ]
+
           s = "\n".join(lines) + "\n"
+
+          s = s.replace(
+              "id 'com.android.application'",
+              "id 'com.android.application'\n    id 'org.jetbrains.kotlin.android'"
+          )
+
           s = s.replace("compileSdk 35", "compileSdk 37")
 
           if "compileSdk 37" not in s:
-              raise SystemExit("compileSdk 37 update failed")
-          if "org.jetbrains.kotlin.android" in s:
-              raise SystemExit("Kotlin plugin was not removed")
+              raise SystemExit("compileSdk 37 configuration failed")
+
+          if "org.jetbrains.kotlin.android" not in s:
+              raise SystemExit("Kotlin plugin missing from app module")
+
           p.write_text(s)
 
-          # Ensure JitPack is available for kadb dependencies
+          # Dependency repositories
           p = root / "settings.gradle"
           s = p.read_text()
+
           old = "repositories { google(); mavenCentral() }"
           new = "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
 
@@ -127,16 +150,22 @@ jobs:
               if old not in s:
                   raise SystemExit("Could not find dependency repositories")
               s = s.replace(old, new)
+
           p.write_text(s)
 
-          # Remove old opt-out and deprecated settings
+          # Disable AGP built-in Kotlin to use Kotlin Gradle Plugin 2.4.20
           p = root / "gradle.properties"
           s = p.read_text()
-          s = s.replace("android.builtInKotlin=false\n", "")
-          s = s.replace("android.suppressUnsupportedCompileSdk=37\n", "")
-          p.write_text(s)
 
-          print("AGP 9.1.1 and built-in Kotlin migration completed")
+          lines = [
+              line for line in s.splitlines()
+              if not line.startswith("android.builtInKotlin=")
+          ]
+
+          lines.append("android.builtInKotlin=false")
+          p.write_text("\n".join(lines) + "\n")
+
+          print("AGP 9.1.1 + Kotlin Gradle Plugin 2.4.20 configured")
           PY
 
       - name: Verify build configuration
@@ -145,6 +174,8 @@ jobs:
           cat source_unpacked/RedmiResolutionManager/build.gradle
           echo "App build.gradle:"
           cat source_unpacked/RedmiResolutionManager/app/build.gradle
+          echo "Gradle properties:"
+          cat source_unpacked/RedmiResolutionManager/gradle.properties
 
       - name: Build APK
         run: |
