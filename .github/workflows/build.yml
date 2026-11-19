@@ -1,500 +1,324 @@
 
 name: Build Redmi Resolution Manager APK
 
-"on":
+on:
   workflow_dispatch:
   push:
     branches:
       - main
+      - master
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 40
 
     steps:
-      - name: Prepare diagnostic log
-        run: |
-          touch build-full.log
-          echo "Build started" | tee -a build-full.log
-
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Set up Java 17
+      - name: Create diagnostic log
+        shell: bash
+        run: |
+          mkdir -p logs
+          {
+            echo "Redmi Resolution Manager - Build Diagnostic Log"
+            echo "Started: $(date -u)"
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Commit: $GITHUB_SHA"
+            echo "Runner: $RUNNER_OS"
+            echo "----------------------------------------"
+          } > build-full.log
+
+      - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Locate Android SDK
-        shell: bash
-        run: |
-          set -e
-
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
-              -type f -name sdkmanager | sort -V | tail -n 1)"
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "sdkmanager not found"
-            exit 1
-          fi
-
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-          echo "Using SDK manager: $SDKMANAGER"
-          "$SDKMANAGER" --version
-
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          set +e
-
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --licenses
-
-          true
-
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -e
-
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            "platform-tools" \
-            "platforms;android-37.0" \
-            "build-tools;36.0.0"
-
-          echo "Android SDK packages installed"
-
-      - name: Prepare Android 37 SDK
-        shell: bash
-        run: |
-          set -e
-
-          SRC="$ANDROID_HOME/platforms/android-37.0"
-          DST="$ANDROID_HOME/platforms/android-37"
-
-          test -f "$SRC/android.jar"
-
-          rm -rf "$DST"
-          cp -a "$SRC" "$DST"
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-
-          root = Path(os.environ["ANDROID_HOME"]) / "platforms" / "android-37"
-
-          for name in ("source.properties", "package.xml"):
-              p = root / name
-
-              if p.exists():
-                  content = p.read_text()
-                  content = content.replace(
-                      "platforms;android-37.0",
-                      "platforms;android-37"
-                  )
-                  p.write_text(content)
-
-          print("Android 37 SDK prepared")
-          PY
-
-          test -f "$DST/android.jar"
-
-      - name: Set up Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
-      - name: Check source ZIP
+      - name: Build APK and collect diagnostics
         shell: bash
         run: |
-          set -e
-
-          ls -lah
-
-          test -f Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip
-
-          echo "Source ZIP found"
-
-      - name: Extract source
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p source_unpacked
-
-          unzip -q \
-            Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip \
-            -d source_unpacked
-
-          ROOT="source_unpacked/RedmiResolutionManager"
-
-          test -f "$ROOT/settings.gradle"
-          test -f "$ROOT/build.gradle"
-          test -f "$ROOT/app/build.gradle"
-
-          echo "Source extracted successfully"
-
-      - name: Fix Java and Kotlin callbacks
-        shell: bash
-        run: |
-          set -e
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path("source_unpacked/RedmiResolutionManager")
-
-          # Fix Kotlin callbacks for Java callers.
-          p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
-          s = p.read_text()
-
-          if "import java.util.function.Consumer" not in s:
-              s = s.replace(
-                  "package com.rezadev.resolutionmanager",
-                  "package com.rezadev.resolutionmanager\n\nimport java.util.function.Consumer"
-              )
-
-          s = s.replace(
-              "success: (String) -> Unit",
-              "success: Consumer<String>"
-          )
-
-          s = s.replace(
-              "failure: (String) -> Unit",
-              "failure: Consumer<String>"
-          )
-
-          s = s.replace(
-              'success("ADB داخلی متصل شد")',
-              'success.accept("ADB داخلی متصل شد")'
-          )
-
-          s = s.replace(
-              "success(result.output)",
-              "success.accept(result.output)"
-          )
-
-          s = s.replace(
-              "failure(t.message ?: t.javaClass.simpleName)",
-              "failure.accept(t.message ?: t.javaClass.simpleName)"
-          )
-
-          if "success: (String) -> Unit" in s:
-              raise SystemExit("Success callback conversion failed")
-
-          if "failure: (String) -> Unit" in s:
-              raise SystemExit("Failure callback conversion failed")
-
-          if "success.accept(" not in s or "failure.accept(" not in s:
-              raise SystemExit("Callback verification failed")
-
-          p.write_text(s)
-
-          # Fix WindowManager.LayoutParams constructor.
-          p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
-          s = p.read_text()
-
-          marker = "private WindowManager.LayoutParams params("
-          start = s.find(marker)
-
-          if start == -1:
-              raise SystemExit("LayoutParams method not found")
-
-          opening = s.find("{", start)
-
-          if opening == -1:
-              raise SystemExit("LayoutParams method body not found")
-
-          depth = 0
-          end = -1
-
-          for i in range(opening, len(s)):
-              if s[i] == "{":
-                  depth += 1
-              elif s[i] == "}":
-                  depth -= 1
-
-                  if depth == 0:
-                      end = i + 1
-                      break
-
-          if end == -1:
-              raise SystemExit("LayoutParams method body is incomplete")
-
-          replacement = """private WindowManager.LayoutParams params(int w, int h, int gravity) {
-                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                      w,
-                      h,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                      PixelFormat.TRANSLUCENT
-                  );
-                  lp.gravity = gravity;
-                  return lp;
-              }"""
-
-          s = s[:start] + replacement + s[end:]
-
-          if "PixelFormat.TRANSLUCENT, gravity);" in s:
-              raise SystemExit("Old LayoutParams constructor remains")
-
-          if "lp.gravity = gravity;" not in s:
-              raise SystemExit("LayoutParams gravity verification failed")
-
-          p.write_text(s)
-
-          print("ADBBridge callbacks fixed")
-          print("FloatingGamingService constructor fixed")
-          PY
-
-      - name: Fix MainActivity lambda variable
-        shell: bash
-        run: |
-          set -e
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path(
-              "source_unpacked/RedmiResolutionManager/app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
-          )
-
-          s = p.read_text()
-
-          old = '''        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }
-                new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'''
-
-          new = '''        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }
-                final int finalCount = count;
-                new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'''
-
-          if old not in s:
-              raise SystemExit("MainActivity insertion point not found")
-
-          s = s.replace(old, new, 1)
-
-          old_lambda = '"درخواست توقف برای " + count + " برنامه ارسال شد."'
-          new_lambda = '"درخواست توقف برای " + finalCount + " برنامه ارسال شد."'
-
-          if old_lambda not in s:
-              raise SystemExit("MainActivity lambda expression not found")
-
-          s = s.replace(old_lambda, new_lambda, 1)
-
-          if "final int finalCount = count;" not in s:
-              raise SystemExit("finalCount declaration missing")
-
-          if new_lambda not in s:
-              raise SystemExit("MainActivity lambda fix verification failed")
-
-          p.write_text(s)
-
-          print("MainActivity lambda variable fixed")
-          PY
-
-      - name: Configure Android and Kotlin
-        shell: bash
-        run: |
-          set -e
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path("source_unpacked/RedmiResolutionManager")
-
-          # Root Gradle configuration
-          p = root / "build.gradle"
-          s = p.read_text()
-
-          s = s.replace(
-              "com.android.application' version '8.7.3'",
-              "com.android.application' version '9.1.1'"
-          )
-
-          if "com.android.application' version '9.1.1'" not in s:
-              raise SystemExit("Android Gradle Plugin configuration failed")
-
-          lines = [
-              line for line in s.splitlines()
-              if "org.jetbrains.kotlin.android" not in line
-          ]
-
-          s = "\n".join(lines)
-
-          marker = (
-              "id 'com.android.application' version '9.1.1' apply false"
-          )
-
-          replacement = (
-              marker
-              + "\n    id 'org.jetbrains.kotlin.android' "
-              + "version '2.4.20' apply false"
-          )
-
-          s = s.replace(marker, replacement)
-
-          if "org.jetbrains.kotlin.android" not in s:
-              raise SystemExit("Kotlin plugin configuration failed")
-
-          p.write_text(s + "\n")
-
-          # App Gradle configuration
-          p = root / "app/build.gradle"
-          s = p.read_text()
-
-          lines = [
-              line for line in s.splitlines()
-              if "org.jetbrains.kotlin.android" not in line
-          ]
-
-          s = "\n".join(lines) + "\n"
-
-          s = s.replace(
-              "id 'com.android.application'",
-              "id 'com.android.application'\n    "
-              "id 'org.jetbrains.kotlin.android'"
-          )
-
-          s = s.replace("compileSdk 35", "compileSdk 37")
-
-          if "compileSdk 37" not in s:
-              raise SystemExit("compileSdk configuration failed")
-
-          if "sourceCompatibility JavaVersion.VERSION_17" not in s:
-              s += """
-          android {
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          """
-
-          if 'jvmTarget = "17"' not in s:
-              s += """
-          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          }
-          """
-
-          p.write_text(s)
-
-          # JitPack repository
-          p = root / "settings.gradle"
-          s = p.read_text()
-
-          old = "repositories { google(); mavenCentral() }"
-
-          if "https://jitpack.io" not in s:
-              if old not in s:
-                  raise SystemExit("Dependency repositories not found")
-
-              new = (
-                  "repositories { google(); mavenCentral(); "
-                  "maven { url 'https://jitpack.io' } }"
-              )
-
-              s = s.replace(old, new)
-
-          p.write_text(s)
-
-          # Gradle properties
-          p = root / "gradle.properties"
-          s = p.read_text()
-
-          lines = [
-              line for line in s.splitlines()
-              if not line.startswith("android.builtInKotlin=")
-              and not line.startswith("android.newDsl=")
-          ]
-
-          lines.extend([
-              "android.builtInKotlin=false",
-              "android.newDsl=false"
-          ])
-
-          p.write_text("\n".join(lines) + "\n")
-
-          print("Gradle configuration completed")
-          PY
-
-      - name: Verify source fixes
-        shell: bash
-        run: |
-          set -e
-
-          ROOT="source_unpacked/RedmiResolutionManager"
-
-          grep -n "Consumer<String>" \
-            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
-
-          grep -n "lp.gravity = gravity" \
-            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
-
-          grep -n "final int finalCount = count;" \
-            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
-
-          echo "Source verification passed"
-
-      - name: Verify build environment
-        shell: bash
-        run: |
-          set -e
-
-          java -version
-          gradle --version
-
-          echo "Android platforms:"
-          ls "$ANDROID_HOME/platforms"
-
-          cat source_unpacked/RedmiResolutionManager/app/build.gradle
-
-      - name: Build APK
-        shell: bash
-        run: |
-          cd source_unpacked/RedmiResolutionManager
-
           set +e
 
-          gradle --no-daemon clean assembleDebug \
-            --stacktrace \
-            --info \
-            --console=plain \
-            2>&1 | tee "$GITHUB_WORKSPACE/build-full.log"
+          {
+            set -Eeuo pipefail
+
+            echo "===== JAVA VERSION ====="
+            java -version
+
+            echo "===== GRADLE VERSION ====="
+            gradle --version
+
+            echo "===== ANDROID SDK ====="
+
+            SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+            export ANDROID_HOME="$SDK_ROOT"
+            export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+
+            if [ -z "$SDKMANAGER" ]; then
+              echo "ERROR: sdkmanager not found"
+              exit 1
+            fi
+
+            echo "SDKMANAGER: $SDKMANAGER"
+
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
+
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+              "platform-tools" \
+              "platforms;android-37.0" \
+              "build-tools;36.0.0"
+
+            if [ -d "$SDK_ROOT/platforms/android-37.0" ]; then
+              mkdir -p "$SDK_ROOT/platforms/android-37"
+              cp -a "$SDK_ROOT/platforms/android-37.0/." \
+                "$SDK_ROOT/platforms/android-37/"
+            fi
+
+            echo "===== FIND SOURCE ZIP ====="
+
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 \
+              -type f \
+              -name 'Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip' \
+              -print -quit)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: Source ZIP was not found"
+              exit 1
+            fi
+
+            echo "Source: $ZIP_FILE"
+
+            mkdir -p source_unpacked
+            unzip -q "$ZIP_FILE" -d source_unpacked
+
+            PROJECT_DIR="source_unpacked/RedmiResolutionManager"
+
+            if [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+              echo "ERROR: Project directory is invalid"
+              find source_unpacked -maxdepth 3 -type f
+              exit 1
+            fi
+
+            echo "===== PATCH SOURCE FILES ====="
+
+            python3 - <<'PY'
+            from pathlib import Path
+            import re
+
+            root = Path("source_unpacked/RedmiResolutionManager")
+
+            # 1. Fix ADBBridge Kotlin callbacks for Kadb API.
+            p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
+            s = p.read_text()
+
+            if "import java.util.function.Consumer" not in s:
+                s = s.replace(
+                    "package com.rezadev.resolutionmanager",
+                    "package com.rezadev.resolutionmanager\n\nimport java.util.function.Consumer",
+                    1
+                )
+
+            s = re.sub(
+                r'(success|failure):\s*\(String\)\s*->\s*Unit',
+                r'\1: Consumer<String>',
+                s
+            )
+
+            s = re.sub(
+                r'\b(success|failure)\(',
+                r'\1.accept(',
+                s
+            )
+
+            if "success: Consumer<String>" not in s:
+                raise SystemExit("ADBBridge success callback patch failed")
+
+            if "failure: Consumer<String>" not in s:
+                raise SystemExit("ADBBridge failure callback patch failed")
+
+            p.write_text(s)
+            print("ADBBridge.kt patched")
+
+            # 2. Fix WindowManager.LayoutParams constructor.
+            p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
+            s = p.read_text()
+
+            pattern = re.compile(
+                r'private\s+WindowManager\.LayoutParams\s+params'
+                r'\(int\s+w,\s*int\s+h,\s*int\s+gravity\)\s*\{'
+            )
+
+            match = pattern.search(s)
+            if not match:
+                raise SystemExit("FloatingGamingService params method not found")
+
+            start = match.end()
+            depth = 1
+            end = start
+
+            while end < len(s) and depth:
+                if s[end] == "{":
+                    depth += 1
+                elif s[end] == "}":
+                    depth -= 1
+                end += 1
+
+            if depth != 0:
+                raise SystemExit("FloatingGamingService method braces invalid")
+
+            body = """
+                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    w,
+                    h,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                );
+                lp.gravity = gravity;
+                return lp;
+            """
+
+            s = s[:start] + body + s[end - 1:]
+            p.write_text(s)
+            print("FloatingGamingService.java patched")
+
+            # 3. Fix count variable captured by Java lambda.
+            p = root / "app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
+            s = p.read_text()
+
+            needle = (
+                '        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }\n'
+                '        new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'
+            )
+
+            replacement = (
+                '        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }\n'
+                '        final int finalCount = count;\n'
+                '        new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'
+            )
+
+            if "final int finalCount = count;" not in s:
+                if needle not in s:
+                    raise SystemExit("MainActivity insertion point not found")
+                s = s.replace(needle, replacement, 1)
+
+            old_lambda = '"درخواست توقف برای " + count + " برنامه ارسال شد."'
+            new_lambda = '"درخواست توقف برای " + finalCount + " برنامه ارسال شد."'
+
+            if old_lambda in s:
+                s = s.replace(old_lambda, new_lambda, 1)
+
+            if new_lambda not in s:
+                raise SystemExit("MainActivity lambda patch verification failed")
+
+            p.write_text(s)
+            print("MainActivity.java lambda patched")
+
+            # 4. Configure Gradle files.
+            p = root / "build.gradle"
+            p.write_text("""plugins {
+                id 'com.android.application' version '9.1.1' apply false
+                id 'org.jetbrains.kotlin.android' version '2.4.20' apply false
+            }
+            """)
+
+            p = root / "settings.gradle"
+            s = p.read_text()
+
+            if "https://jitpack.io" not in s:
+                s = s.replace(
+                    "repositories { google(); mavenCentral() }",
+                    "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
+                )
+
+            p.write_text(s)
+
+            p = root / "gradle.properties"
+            s = p.read_text()
+
+            for line in (
+                "android.builtInKotlin=false",
+                "android.newDsl=false"
+            ):
+                if line not in s:
+                    s += "\n" + line
+
+            p.write_text(s)
+
+            p = root / "app/build.gradle"
+            s = p.read_text()
+
+            s = re.sub(r'compileSdk\s+\d+', 'compileSdk 37', s, count=1)
+
+            if "sourceCompatibility JavaVersion.VERSION_17" not in s:
+                s += """
+            android {
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+            }
+            """
+
+            if 'jvmTarget = "17"' not in s:
+                s += """
+            tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+                kotlinOptions {
+                    jvmTarget = "17"
+                }
+            }
+            """
+
+            p.write_text(s)
+            print("Gradle configuration completed")
+            PY
+
+            echo "===== VERIFY PATCHES ====="
+
+            grep -n "finalCount" \
+              "$PROJECT_DIR/app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
+
+            echo "===== BUILD APK ====="
+
+            cd "$PROJECT_DIR"
+
+            gradle --no-daemon clean assembleDebug \
+              --stacktrace --info --console=plain
+
+            echo "===== APK OUTPUT ====="
+
+            find app/build/outputs/apk -type f -name '*.apk' -print
+
+          } 2>&1 | tee -a "$GITHUB_WORKSPACE/build-full.log"
 
           BUILD_STATUS=${PIPESTATUS[0]}
 
-          echo "BUILD_STATUS=$BUILD_STATUS"
+          echo "========================================" | tee -a "$GITHUB_WORKSPACE/build-full.log"
+          echo "BUILD EXIT CODE: $BUILD_STATUS" | tee -a "$GITHUB_WORKSPACE/build-full.log"
+          echo "FINISHED: $(date -u)" | tee -a "$GITHUB_WORKSPACE/build-full.log"
 
           exit "$BUILD_STATUS"
 
-      - name: Upload diagnostic log
+      - name: Upload build diagnostic log
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: Build-Diagnostic-Log
           path: build-full.log
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload APK
         if: success()
@@ -503,4 +327,5 @@ jobs:
           name: Redmi-Resolution-Manager-APK
           path: source_unpacked/RedmiResolutionManager/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
           
