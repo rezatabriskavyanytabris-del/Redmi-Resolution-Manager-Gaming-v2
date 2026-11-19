@@ -45,41 +45,31 @@ jobs:
           DST="$SDK/platforms/android-37"
 
           test -d "$SRC"
-
-          rm -f "$DST"
           rm -rf "$DST"
-
           cp -a "$SRC" "$DST"
 
           python3 - <<'PY'
           from pathlib import Path
-
-          root = Path.home() / "Android" / "Sdk"
           import os
+
           root = Path(os.environ["ANDROID_HOME"]) / "platforms" / "android-37"
 
-          p = root / "source.properties"
-          if p.exists():
-              s = p.read_text()
-              s = s.replace("platforms;android-37.0", "platforms;android-37")
-              p.write_text(s)
+          for name in ("source.properties", "package.xml"):
+              p = root / name
+              if p.exists():
+                  s = p.read_text()
+                  s = s.replace("platforms;android-37.0", "platforms;android-37")
+                  p.write_text(s)
 
-          p = root / "package.xml"
-          if p.exists():
-              s = p.read_text()
-              s = s.replace("platforms;android-37.0", "platforms;android-37")
-              p.write_text(s)
-
-          print("Android 37 SDK metadata updated")
+          print("Android 37 SDK prepared")
           PY
 
           test -f "$DST/android.jar"
-          echo "Android 37 SDK is ready"
 
-      - name: Set up Gradle 8.9
+      - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '9.3.1'
 
       - name: Extract source ZIP
         run: |
@@ -87,44 +77,74 @@ jobs:
           test -f source_unpacked/RedmiResolutionManager/settings.gradle
           test -f source_unpacked/RedmiResolutionManager/app/build.gradle
 
-      - name: Update Android build versions
+      - name: Migrate project to AGP 9 built-in Kotlin
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
+          # Update root Android Gradle Plugin and remove separate Kotlin plugin
           p = root / "build.gradle"
           s = p.read_text()
-          s = s.replace("com.android.application' version '8.7.3'", "com.android.application' version '8.7.3'")
-          s = s.replace("org.jetbrains.kotlin.android' version '2.0.21'", "org.jetbrains.kotlin.android' version '2.0.21'")
+          s = s.replace(
+              "com.android.application' version '8.7.3'",
+              "com.android.application' version '9.1.1'"
+          )
+          lines = [
+              line for line in s.splitlines()
+              if "org.jetbrains.kotlin.android" not in line
+          ]
+          s = "\n".join(lines) + "\n"
+
+          if "version '9.1.1'" not in s:
+              raise SystemExit("AGP 9.1.1 update failed")
           p.write_text(s)
 
+          # Remove Kotlin Android plugin from app module
           p = root / "app/build.gradle"
-          s = p.read_text().replace("compileSdk 35", "compileSdk 37")
+          s = p.read_text()
+          lines = [
+              line for line in s.splitlines()
+              if "org.jetbrains.kotlin.android" not in line
+          ]
+          s = "\n".join(lines) + "\n"
+          s = s.replace("compileSdk 35", "compileSdk 37")
+
           if "compileSdk 37" not in s:
-              raise SystemExit("Could not set compileSdk 37")
+              raise SystemExit("compileSdk 37 update failed")
+          if "org.jetbrains.kotlin.android" in s:
+              raise SystemExit("Kotlin plugin was not removed")
           p.write_text(s)
 
+          # Ensure JitPack is available for kadb dependencies
           p = root / "settings.gradle"
           s = p.read_text()
           old = "repositories { google(); mavenCentral() }"
           new = "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
+
           if "https://jitpack.io" not in s:
               if old not in s:
                   raise SystemExit("Could not find dependency repositories")
               s = s.replace(old, new)
           p.write_text(s)
 
+          # Remove old opt-out and deprecated settings
           p = root / "gradle.properties"
           s = p.read_text()
           s = s.replace("android.builtInKotlin=false\n", "")
-          if "android.suppressUnsupportedCompileSdk=37" not in s:
-              s += "\nandroid.suppressUnsupportedCompileSdk=37\n"
+          s = s.replace("android.suppressUnsupportedCompileSdk=37\n", "")
           p.write_text(s)
 
-          print("Project configuration updated")
+          print("AGP 9.1.1 and built-in Kotlin migration completed")
           PY
+
+      - name: Verify build configuration
+        run: |
+          echo "Root build.gradle:"
+          cat source_unpacked/RedmiResolutionManager/build.gradle
+          echo "App build.gradle:"
+          cat source_unpacked/RedmiResolutionManager/app/build.gradle
 
       - name: Build APK
         run: |
