@@ -34,14 +34,14 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
-      - name: Install Android SDK 37
+      - name: Install Android SDK
         run: |
           sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
 
-      - name: Set up Gradle 9.3.1
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
+          gradle-version: '8.9'
 
       - name: Extract source ZIP
         run: |
@@ -58,33 +58,35 @@ jobs:
 
           p = root / "build.gradle"
           s = p.read_text()
-          s = s.replace("com.android.application' version '8.7.3'", "com.android.application' version '9.1.1'")
-          s = s.replace("org.jetbrains.kotlin.android' version '2.0.21'", "org.jetbrains.kotlin.android' version '2.2.10'")
-          if "version '9.1.1'" not in s or "version '2.2.10'" not in s:
-              raise SystemExit("Could not update root plugin versions")
+          s = s.replace("com.android.application' version '8.7.3'", "com.android.application' version '8.7.3'")
+          s = s.replace("org.jetbrains.kotlin.android' version '2.0.21'", "org.jetbrains.kotlin.android' version '2.0.21'")
+          if "version '8.7.3'" not in s or "version '2.0.21'" not in s:
+              raise SystemExit("Plugin versions could not be verified")
           p.write_text(s)
 
           p = root / "app/build.gradle"
           s = p.read_text().replace("compileSdk 35", "compileSdk 37")
           if "compileSdk 37" not in s:
-              raise SystemExit("Could not update compileSdk")
+              raise SystemExit("Could not set compileSdk 37")
           p.write_text(s)
 
           p = root / "settings.gradle"
           s = p.read_text()
           old = "repositories { google(); mavenCentral() }"
           new = "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
-          if old not in s:
-              raise SystemExit("Could not find dependency repositories")
-          p.write_text(s.replace(old, new))
+          if "https://jitpack.io" not in s:
+              if old not in s:
+                  raise SystemExit("Could not find dependency repositories")
+              s = s.replace(old, new)
+          p.write_text(s)
 
           p = root / "gradle.properties"
           s = p.read_text()
-          if "android.builtInKotlin=false" not in s:
-              s += "\nandroid.builtInKotlin=false\n"
+          s = s.replace("\nandroid.builtInKotlin=false\n", "\n")
+          s = s.replace("android.builtInKotlin=false\n", "")
           p.write_text(s)
 
-          print("Android build configuration updated")
+          print("Build configuration updated successfully")
           PY
 
       - name: Build APK
