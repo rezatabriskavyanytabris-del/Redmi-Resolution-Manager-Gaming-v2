@@ -61,12 +61,32 @@ jobs:
               exit 1
             fi
 
-            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
+            echo "Accepting Android SDK licenses..."
 
-            "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            set +o pipefail
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+            LICENSE_STATUS=${PIPESTATUS[1]}
+            set -o pipefail
+
+            if [ "$LICENSE_STATUS" -ne 0 ]; then
+              echo "ERROR: SDK license acceptance failed"
+              exit "$LICENSE_STATUS"
+            fi
+
+            echo "Installing Android SDK packages..."
+
+            set +o pipefail
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
               "platform-tools" \
               "platforms;android-37.0" \
               "build-tools;36.0.0"
+            INSTALL_STATUS=${PIPESTATUS[1]}
+            set -o pipefail
+
+            if [ "$INSTALL_STATUS" -ne 0 ]; then
+              echo "ERROR: SDK package installation failed"
+              exit "$INSTALL_STATUS"
+            fi
 
             if [ -d "$SDK_ROOT/platforms/android-37.0" ]; then
               mkdir -p "$SDK_ROOT/platforms/android-37"
@@ -123,7 +143,6 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # ADBBridge Kotlin callback patch
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
           s = p.read_text()
 
@@ -140,11 +159,7 @@ jobs:
               s
           )
 
-          s = re.sub(
-              r'\b(success|failure)\(',
-              r'\1.accept(',
-              s
-          )
+          s = re.sub(r'\b(success|failure)\(', r'\1.accept(', s)
 
           if "success: Consumer<String>" not in s:
               raise SystemExit("ADBBridge success callback patch failed")
@@ -155,7 +170,6 @@ jobs:
           p.write_text(s)
           print("ADBBridge.kt patched")
 
-          # Floating service patch
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
           s = p.read_text()
 
@@ -200,7 +214,6 @@ jobs:
           p.write_text(s)
           print("FloatingGamingService.java patched")
 
-          # MainActivity lambda patch
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
           s = p.read_text()
 
@@ -232,10 +245,8 @@ jobs:
 
           p.write_text(s)
           print("MainActivity.java patched")
-
           print("All source patches completed")
           PY
-        # Python output is captured in the Actions step log.
 
       - name: Configure Gradle
         shell: bash
@@ -302,7 +313,6 @@ jobs:
           """
 
           p.write_text(s)
-
           print("Gradle configuration completed")
           PY
 
