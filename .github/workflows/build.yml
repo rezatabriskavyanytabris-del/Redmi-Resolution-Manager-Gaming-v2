@@ -1,227 +1,93 @@
 
-name: Build Redmi Resolution Manager APK
+package com.rezadev.resolutionmanager
 
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+import android.content.Context
+import com.flyfishxu.kadb.Kadb
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.util.function.Consumer
 
-permissions:
-  contents: read
+/** Internal Wireless Debugging ADB bridge. */
+object ADBBridge {
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    @JvmStatic
+    fun pairAndConnect(
+        context: Context,
+        host: String,
+        pairingPort: Int,
+        pairingCode: String,
+        connectPort: Int,
+        success: Consumer<String>,
+        failure: Consumer<String>
+    ) {
+        scope.launch {
+            try {
+                Kadb.pair(host, pairingPort, pairingCode)
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
+                Kadb.create(host, connectPort).use { adb ->
+                    val result = adb.shell("echo RRM_ADB_CONNECTED")
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: 'false'
-          packages: ''
+                    if (result.exitCode != 0 ||
+                        !result.output.contains("RRM_ADB_CONNECTED")) {
+                        throw IllegalStateException(
+                            result.output.ifBlank {
+                                "ADB connection verification failed"
+                            }
+                        )
+                    }
+                }
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | sdkmanager --licenses || true
+                context.getSharedPreferences(
+                    "adb",
+                    Context.MODE_PRIVATE
+                ).edit()
+                    .putString("host", host)
+                    .putInt("port", connectPort)
+                    .apply()
 
-      - name: Install Android SDK
-        run: |
-          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
+                success.accept("ADB داخلی متصل شد")
 
-      - name: Fix Android 37 SDK package metadata
-        run: |
-          SDK="$ANDROID_HOME"
-          SRC="$SDK/platforms/android-37.0"
-          DST="$SDK/platforms/android-37"
+            } catch (t: Throwable) {
+                failure.accept(
+                    t.message ?: t.javaClass.simpleName
+                )
+            }
+        }
+    }
 
-          test -d "$SRC"
-          rm -rf "$DST"
-          cp -a "$SRC" "$DST"
+    @JvmStatic
+    fun shell(
+        host: String,
+        port: Int,
+        command: String,
+        success: Consumer<String>,
+        failure: Consumer<String>
+    ) {
+        scope.launch {
+            try {
+                Kadb.create(host, port).use { adb ->
+                    val result = adb.shell(command)
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
+                    if (result.exitCode != 0) {
+                        throw IllegalStateException(
+                            result.output.ifBlank {
+                                "Command failed"
+                            }
+                        )
+                    }
 
-          root = Path(os.environ["ANDROID_HOME"]) / "platforms" / "android-37"
+                    success.accept(result.output)
+                }
 
-          for name in ("source.properties", "package.xml"):
-              p = root / name
-              if p.exists():
-                  s = p.read_text()
-                  s = s.replace("platforms;android-37.0", "platforms;android-37")
-                  p.write_text(s)
-
-          print("Android 37 SDK prepared")
-          PY
-
-          test -f "$DST/android.jar"
-
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
-
-      - name: Extract source ZIP
-        run: |
-          unzip -q Redmi-Resolution-Manager-Gaming-Edition-ADB-v5.zip -d source_unpacked
-          test -f source_unpacked/RedmiResolutionManager/settings.gradle
-          test -f source_unpacked/RedmiResolutionManager/app/build.gradle
-
-      - name: Configure AGP and Kotlin 2.4.20
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path("source_unpacked/RedmiResolutionManager")
-
-          p = root / "build.gradle"
-          s = p.read_text()
-
-          s = s.replace(
-              "com.android.application' version '8.7.3'",
-              "com.android.application' version '9.1.1'"
-          )
-
-          if "com.android.application' version '9.1.1'" not in s:
-              raise SystemExit("Could not configure AGP 9.1.1")
-
-          lines = [
-              line for line in s.splitlines()
-              if "org.jetbrains.kotlin.android" not in line
-          ]
-
-          s = "\n".join(lines)
-
-          s = s.replace(
-              "id 'com.android.application' version '9.1.1' apply false",
-              "id 'com.android.application' version '9.1.1' apply false\n id 'org.jetbrains.kotlin.android' version '2.4.20' apply false"
-          )
-
-          if "org.jetbrains.kotlin.android" not in s:
-              raise SystemExit("Could not add Kotlin 2.4.20 plugin")
-
-          p.write_text(s + "\n")
-
-          p = root / "app/build.gradle"
-          s = p.read_text()
-
-          lines = [
-              line for line in s.splitlines()
-              if "org.jetbrains.kotlin.android" not in line
-          ]
-
-          s = "\n".join(lines) + "\n"
-
-          s = s.replace(
-              "id 'com.android.application'",
-              "id 'com.android.application'\n id 'org.jetbrains.kotlin.android'"
-          )
-
-          s = s.replace("compileSdk 35", "compileSdk 37")
-
-          if "compileSdk 37" not in s:
-              raise SystemExit("compileSdk 37 configuration failed")
-
-          if "sourceCompatibility JavaVersion.VERSION_17" not in s:
-              s += """
-          android {
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          """
-
-          if 'jvmTarget = "17"' not in s:
-              s += """
-          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          }
-          """
-
-          p.write_text(s)
-
-          p = root / "settings.gradle"
-          s = p.read_text()
-
-          old = "repositories { google(); mavenCentral() }"
-          new = "repositories { google(); mavenCentral(); maven { url 'https://jitpack.io' } }"
-
-          if "https://jitpack.io" not in s:
-              if old not in s:
-                  raise SystemExit("Could not find dependency repositories")
-              s = s.replace(old, new)
-
-          p.write_text(s)
-
-          p = root / "gradle.properties"
-          s = p.read_text()
-
-          lines = [
-              line for line in s.splitlines()
-              if not line.startswith("android.builtInKotlin=")
-              and not line.startswith("android.newDsl=")
-          ]
-
-          lines.append("android.builtInKotlin=false")
-          lines.append("android.newDsl=false")
-
-          p.write_text("\n".join(lines) + "\n")
-
-          print("AGP 9.1.1 + Kotlin 2.4.20 configured")
-          print("Java and Kotlin JVM targets set to 17")
-          PY
-
-      - name: Verify build configuration
-        run: |
-          echo "Root build.gradle:"
-          cat source_unpacked/RedmiResolutionManager/build.gradle
-
-          echo "App build.gradle:"
-          cat source_unpacked/RedmiResolutionManager/app/build.gradle
-
-          echo "Gradle properties:"
-          cat source_unpacked/RedmiResolutionManager/gradle.properties
-
-      - name: Build APK and collect diagnostics
-        run: |
-          cd source_unpacked/RedmiResolutionManager
-
-          set +e
-          gradle --no-daemon clean assembleDebug --stacktrace --info --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build-full.log"
-
-          BUILD_STATUS=${PIPESTATUS[0]}
-
-          echo "BUILD_STATUS=$BUILD_STATUS"
-
-          grep -n -E "e: |error:|Unresolved reference|What went wrong|Compilation error" "$GITHUB_WORKSPACE/build-full.log" || true
-
-          exit "$BUILD_STATUS"
-
-      - name: Upload build diagnostic log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-Diagnostic-Log
-          path: build-full.log
-          if-no-files-found: warn
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Redmi-Resolution-Manager-APK
-          path: source_unpacked/RedmiResolutionManager/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          
+            } catch (t: Throwable) {
+                failure.accept(
+                    t.message ?: t.javaClass.simpleName
+                )
+            }
+        }
+    }
+}
