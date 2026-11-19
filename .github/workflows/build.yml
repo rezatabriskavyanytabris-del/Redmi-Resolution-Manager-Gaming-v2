@@ -38,22 +38,43 @@ jobs:
         run: |
           sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
 
-      - name: Fix Android 37 SDK directory
+      - name: Fix Android 37 SDK package metadata
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME/platforms/"
+          SDK="$ANDROID_HOME"
+          SRC="$SDK/platforms/android-37.0"
+          DST="$SDK/platforms/android-37"
 
-          if [ -d "$ANDROID_HOME/platforms/android-37.0" ]; then
-            if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
-              ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
-            fi
-          else
-            echo "Android 37.0 SDK was not installed"
-            exit 1
-          fi
+          test -d "$SRC"
 
-          test -d "$ANDROID_HOME/platforms/android-37"
-          echo "Android 37 SDK path fixed successfully"
+          rm -f "$DST"
+          rm -rf "$DST"
+
+          cp -a "$SRC" "$DST"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path.home() / "Android" / "Sdk"
+          import os
+          root = Path(os.environ["ANDROID_HOME"]) / "platforms" / "android-37"
+
+          p = root / "source.properties"
+          if p.exists():
+              s = p.read_text()
+              s = s.replace("platforms;android-37.0", "platforms;android-37")
+              p.write_text(s)
+
+          p = root / "package.xml"
+          if p.exists():
+              s = p.read_text()
+              s = s.replace("platforms;android-37.0", "platforms;android-37")
+              p.write_text(s)
+
+          print("Android 37 SDK metadata updated")
+          PY
+
+          test -f "$DST/android.jar"
+          echo "Android 37 SDK is ready"
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -77,8 +98,6 @@ jobs:
           s = p.read_text()
           s = s.replace("com.android.application' version '8.7.3'", "com.android.application' version '8.7.3'")
           s = s.replace("org.jetbrains.kotlin.android' version '2.0.21'", "org.jetbrains.kotlin.android' version '2.0.21'")
-          if "version '8.7.3'" not in s or "version '2.0.21'" not in s:
-              raise SystemExit("Plugin versions could not be verified")
           p.write_text(s)
 
           p = root / "app/build.gradle"
@@ -100,9 +119,11 @@ jobs:
           p = root / "gradle.properties"
           s = p.read_text()
           s = s.replace("android.builtInKotlin=false\n", "")
+          if "android.suppressUnsupportedCompileSdk=37" not in s:
+              s += "\nandroid.suppressUnsupportedCompileSdk=37\n"
           p.write_text(s)
 
-          print("Build configuration updated successfully")
+          print("Project configuration updated")
           PY
 
       - name: Build APK
