@@ -162,7 +162,7 @@ jobs:
 
           root = Path("source_unpacked/RedmiResolutionManager")
 
-          # Fix Kotlin callbacks so Java can call them using Java lambdas.
+          # Fix Kotlin callbacks for Java callers.
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
           s = p.read_text()
 
@@ -209,7 +209,6 @@ jobs:
           p.write_text(s)
 
           # Fix WindowManager.LayoutParams constructor.
-          # Find the method and replace its entire body safely.
           p = root / "app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
           s = p.read_text()
 
@@ -264,6 +263,51 @@ jobs:
 
           print("ADBBridge callbacks fixed")
           print("FloatingGamingService constructor fixed")
+          PY
+
+      - name: Fix MainActivity lambda variable
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "source_unpacked/RedmiResolutionManager/app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
+          )
+
+          s = p.read_text()
+
+          old = '''        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }
+                new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'''
+
+          new = '''        if (count == 0) { toast("برنامه‌ای برای پاک‌سازی انتخاب نشده است."); return; }
+                final int finalCount = count;
+                new AlertDialog.Builder(this).setTitle("تأیید پاک‌سازی")'''
+
+          if old not in s:
+              raise SystemExit("MainActivity insertion point not found")
+
+          s = s.replace(old, new, 1)
+
+          old_lambda = '"درخواست توقف برای " + count + " برنامه ارسال شد."'
+          new_lambda = '"درخواست توقف برای " + finalCount + " برنامه ارسال شد."'
+
+          if old_lambda not in s:
+              raise SystemExit("MainActivity lambda expression not found")
+
+          s = s.replace(old_lambda, new_lambda, 1)
+
+          if "final int finalCount = count;" not in s:
+              raise SystemExit("finalCount declaration missing")
+
+          if new_lambda not in s:
+              raise SystemExit("MainActivity lambda fix verification failed")
+
+          p.write_text(s)
+
+          print("MainActivity lambda variable fixed")
           PY
 
       - name: Configure Android and Kotlin
@@ -404,11 +448,11 @@ jobs:
           grep -n "Consumer<String>" \
             "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
 
-          grep -n "success.accept" \
-            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/ADBBridge.kt"
-
           grep -n "lp.gravity = gravity" \
             "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/FloatingGamingService.java"
+
+          grep -n "final int finalCount = count;" \
+            "$ROOT/app/src/main/java/com/rezadev/resolutionmanager/MainActivity.java"
 
           echo "Source verification passed"
 
@@ -423,7 +467,6 @@ jobs:
           echo "Android platforms:"
           ls "$ANDROID_HOME/platforms"
 
-          echo "App Gradle configuration:"
           cat source_unpacked/RedmiResolutionManager/app/build.gradle
 
       - name: Build APK
